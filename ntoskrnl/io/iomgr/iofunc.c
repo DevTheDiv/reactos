@@ -2576,6 +2576,27 @@ NtQueryInformationFile(IN HANDLE FileHandle,
                                     sizeof(FILE_MODE_INFORMATION) +
                                     sizeof(FILE_ALIGNMENT_INFORMATION);
     }
+    else if (FileInformationClass == FileIoCompletionNotificationInformation)
+    {
+        PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION NotificationInfo;
+
+        NotificationInfo = Irp->AssociatedIrp.SystemBuffer;
+        NotificationInfo->Flags = 0;
+        if (FileObject->Flags & FO_SKIP_COMPLETION_PORT)
+        {
+            NotificationInfo->Flags |= FILE_SKIP_COMPLETION_PORT_ON_SUCCESS;
+        }
+        if (FileObject->Flags & FO_SKIP_SET_EVENT)
+        {
+            NotificationInfo->Flags |= FILE_SKIP_SET_EVENT_ON_HANDLE;
+        }
+        if (FileObject->Flags & FO_SKIP_SET_FAST_IO)
+        {
+            NotificationInfo->Flags |= FILE_SKIP_SET_USER_EVENT_ON_FAST_IO;
+        }
+        Irp->IoStatus.Information = sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION);
+        CallDriver = FALSE;
+    }
 
     /* Call the Driver */
     if (CallDriver)
@@ -3368,6 +3389,45 @@ NtSetInformationFile(IN HANDLE FileHandle,
                     ObDereferenceObject(Queue);
                     Status = STATUS_INSUFFICIENT_RESOURCES;
                 }
+            }
+        }
+
+        /* Set the IRP Status */
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+    }
+    else if (FileInformationClass == FileIoCompletionNotificationInformation)
+    {
+        PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION NotificationInfo;
+
+        if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            NotificationInfo = Irp->AssociatedIrp.SystemBuffer;
+            if (NotificationInfo->Flags & ~(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS |
+                                            FILE_SKIP_SET_EVENT_ON_HANDLE |
+                                            FILE_SKIP_SET_USER_EVENT_ON_FAST_IO))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+            }
+            else
+            {
+                if (NotificationInfo->Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
+                {
+                    FileObject->Flags |= FO_SKIP_COMPLETION_PORT;
+                }
+                if (NotificationInfo->Flags & FILE_SKIP_SET_EVENT_ON_HANDLE)
+                {
+                    FileObject->Flags |= FO_SKIP_SET_EVENT;
+                }
+                if (NotificationInfo->Flags & FILE_SKIP_SET_USER_EVENT_ON_FAST_IO)
+                {
+                    FileObject->Flags |= FO_SKIP_SET_FAST_IO;
+                }
+                Status = STATUS_SUCCESS;
             }
         }
 

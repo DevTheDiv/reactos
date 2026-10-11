@@ -52,17 +52,7 @@ UCHAR IopQueryOperationLength[] =
     0,
     0,
     0,
-#if 0 // VISTA
     sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
-    sizeof(FILE_IOSTATUSBLOCK_RANGE_INFORMATION),
-    sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),
-    sizeof(FILE_SFIO_RESERVE_INFORMATION),
-    sizeof(FILE_SFIO_VOLUME_INFORMATION),
-    0,
-    sizeof(FILE_PROCESS_IDS_USING_FILE_INFORMATION),
-    0,
-    sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION),
-#endif
     0xFF
 };
 
@@ -109,6 +99,7 @@ UCHAR IopSetOperationLength[] =
     0,
     sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
     sizeof(UNICODE_STRING),
+    sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
     0xFF
 };
 
@@ -150,6 +141,7 @@ ACCESS_MASK IopQueryOperationAccess[] =
     0,
     FILE_READ_ATTRIBUTES,
     FILE_READ_ATTRIBUTES,
+    0,
     0,
     0,
     0,
@@ -201,6 +193,7 @@ ACCESS_MASK IopSetOperationAccess[] =
     0,
     FILE_WRITE_DATA,
     DELETE,
+    0,
     0xFFFFFFFF
 };
 

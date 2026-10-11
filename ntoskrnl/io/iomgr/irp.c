@@ -432,7 +432,10 @@ IopCompleteRequest(IN PKAPC Apc,
         else if (FileObject)
         {
             /* Signal the file object and set the status */
-            KeSetEvent(&FileObject->Event, 0, FALSE);
+            if (!(FileObject->Flags & FO_SKIP_SET_EVENT))
+            {
+                KeSetEvent(&FileObject->Event, 0, FALSE);
+            }
             FileObject->FinalStatus = Irp->IoStatus.Status;
 
             /*
@@ -494,10 +497,21 @@ IopCompleteRequest(IN PKAPC Apc,
         else if ((Port) &&
                  (Irp->Overlay.AsynchronousParameters.UserApcContext))
         {
-            /* We have an I/O Completion setup... create the special Overlay */
-            Irp->Tail.CompletionKey = Key;
-            Irp->Tail.Overlay.PacketType = IopCompletionPacketIrp;
-            KeInsertQueue(Port, &Irp->Tail.Overlay.ListEntry);
+            if ((FileObject) &&
+                (FileObject->Flags & FO_SKIP_COMPLETION_PORT) &&
+                !Irp->PendingReturned &&
+                NT_SUCCESS(Irp->IoStatus.Status))
+            {
+                /* Skip posting to completion port for synchronous success */
+                IoFreeIrp(Irp);
+            }
+            else
+            {
+                /* We have an I/O Completion setup... create the special Overlay */
+                Irp->Tail.CompletionKey = Key;
+                Irp->Tail.Overlay.PacketType = IopCompletionPacketIrp;
+                KeInsertQueue(Port, &Irp->Tail.Overlay.ListEntry);
+            }
         }
         else
         {
