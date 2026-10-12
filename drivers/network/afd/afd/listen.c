@@ -210,6 +210,12 @@ end:
     (void)IoSetCancelRoutine(Irp, NULL);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
 
+    if (Qelt->ConnInfo)
+    {
+        ExFreePoolWithTag(Qelt->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
+    }
+    ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+
     return STATUS_SUCCESS;
 }
 
@@ -296,12 +302,14 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
                ( Qelt->ConnInfo->RemoteAddress,
                  FCB->ListenIrp.ConnectionReturnInfo->RemoteAddress );
             InsertTailList( &FCB->PendingConnections, &Qelt->ListEntry );
+        } else {
+            ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
         }
     }
 
-    /* Satisfy a pre-accept request if one is available */
-    if( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
-        !IsListEmpty( &FCB->PendingConnections ) ) {
+    /* Satisfy pre-accept requests if available */
+    while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
+           !IsListEmpty( &FCB->PendingConnections ) ) {
         PLIST_ENTRY PendingIrp  =
             RemoveHeadList( &FCB->PendingIrpList[FUNCTION_PREACCEPT] );
         PLIST_ENTRY PendingConn = FCB->PendingConnections.Flink;
@@ -315,6 +323,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         else
         {
             SatisfyPreAccept(PendingIrpPtr, ConnectionData);
+            break;
         }
     }
 
@@ -516,7 +525,10 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
             ObDereferenceObject( NewFileObject );
 
-            AFD_DbgPrint(MID_TRACE,("Completed a wait for accept\n"));
+            if (PendingConnObj->ConnInfo)
+            {
+                ExFreePoolWithTag(PendingConnObj->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
+            }
 
             ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
 
@@ -603,6 +615,28 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     
     /* Proceed later in SatisfyAcceptEx */
     SocketStateUnlock(Fcb2);
+
+    if (!IsListEmpty(&Fcb->PendingConnections))
+    {
+        PLIST_ENTRY PendingConn = RemoveHeadList(&Fcb->PendingConnections);
+        PAFD_TDI_OBJECT_QELT ConnectionData = CONTAINING_RECORD(PendingConn, AFD_TDI_OBJECT_QELT, ListEntry);
+
+        Status = SatisfySuperAccept(Fcb, Irp, ConnectionData);
+
+        if (!IsListEmpty(&Fcb->PendingConnections))
+        {
+            Fcb->PollState |= AFD_EVENT_ACCEPT;
+            Fcb->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
+            PollReeval(Fcb->DeviceExt, Fcb->FileObject);
+        }
+        else
+        {
+            Fcb->PollState &= ~AFD_EVENT_ACCEPT;
+        }
+
+        SocketStateUnlock(Fcb);
+        return Status;
+    }
 
     return LeaveIrpUntilLater(Fcb, Irp, FUNCTION_PREACCEPT);
 }

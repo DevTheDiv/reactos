@@ -29,11 +29,19 @@ LibIPInsertPacket(void *ifarg,
     }
 }
 
+PKTHREAD TcpipThread = NULL;
+
+static void
+TcpipInitDone(void *arg)
+{
+    TcpipThread = KeGetCurrentThread();
+}
+
 void
 LibIPInitialize(void)
 {
     /* This completes asynchronously */
-    tcpip_init(NULL, NULL);
+    tcpip_init(TcpipInitDone, NULL);
 }
 
 void

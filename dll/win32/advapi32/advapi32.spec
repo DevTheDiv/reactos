@@ -212,6 +212,7 @@
 @ stdcall EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
 @ stdcall EventSetInformation(int64 long ptr long) ntdll.EtwEventSetInformation
 @ stdcall EventUnregister(int64) ntdll.EtwEventUnregister
+@ stdcall EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
 @ stdcall EventWriteTransfer(long ptr ptr ptr long long) ntdll.EtwEventWriteTransfer
 @ stdcall EncryptFileW(wstr)
 @ stub EncryptedFileKeyInfo
@@ -384,6 +385,7 @@
 @ stdcall LsaLookupPrivilegeName(ptr ptr ptr)
 @ stdcall LsaLookupPrivilegeValue(ptr ptr ptr)
 @ stdcall LsaLookupSids(ptr long ptr ptr ptr)
+@ stdcall -stub LsaManageSidNameMapping(long ptr ptr)
 @ stdcall LsaNtStatusToWinError(long)
 @ stdcall LsaOpenAccount(ptr ptr long ptr)
 @ stdcall LsaOpenPolicy(ptr ptr long ptr)

@@ -45,7 +45,10 @@ CompleteBucket(PCONNECTION_ENDPOINT Connection, PTDI_BUCKET Bucket, const BOOLEA
     }
     else
     {
-        ChewCreate(BucketCompletionWorker, Bucket);
+        if (!ChewCreate(BucketCompletionWorker, Bucket))
+        {
+            BucketCompletionWorker(Bucket);
+        }
     }
 }
 

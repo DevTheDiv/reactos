@@ -65,6 +65,16 @@ int kickoff_telnetd(void)
   return 0;
 }
 
+void stop_telnetd(void)
+{
+  bShutdown = 1;
+  if (sock != 0 && sock != (int)INVALID_SOCKET) {
+    int s = sock;
+    sock = (int)INVALID_SOCKET;
+    closesocket(s);
+  }
+}
+
 /* Cleanup */
 static BOOL WINAPI Cleanup(DWORD dwControlType)
 {
@@ -114,19 +124,24 @@ static void CreateSocket(void)
 
    if (bind(sock, (struct sockaddr*) &sa, sizeof(sa)) != 0)
       ErrorExit("Cannot bind address to socket");
+
+   if (listen(sock, SOMAXCONN) != 0)
+      ErrorExit("Cannot listen on socket");
 }
 
 /* WaitForConnect */
 static void WaitForConnect(void)
 {
   struct sockaddr_in sa;
+  int sa_len = sizeof(sa);
   int new_sock;
 
-  if (listen(sock, 1) < 0)
-     ErrorExit("Cannot listen on socket");
+  if (sock == INVALID_SOCKET)
+    return;
 
-  if ((new_sock = accept(sock, (struct sockaddr*) &sa, NULL)) < 0) {
-    fprintf(stderr, "Failed to accept incoming call\n");
+  if ((new_sock = accept(sock, (struct sockaddr*) &sa, &sa_len)) < 0) {
+    if (!bShutdown)
+      telnetd_printf("Failed to accept incoming call\n");
   } else {
     telnetd_printf("user connected on socket %d, port %d, address %lx\n", new_sock,
                                        htons(sa.sin_port), sa.sin_addr.s_addr);
@@ -138,15 +153,21 @@ static void WaitForConnect(void)
 static void UserLogin(int client_socket)
 {
   HANDLE     threadHandle;
-  client_t  *client = malloc(sizeof(client_t));
+  client_t  *client = calloc(1, sizeof(client_t));
 
   if (client == NULL)
-    ErrorExit("failed to allocate memory for client");
+  {
+    closesocket(client_socket);
+    return;
+  }
 
   client->socket = client_socket;
   threadHandle = CreateThread(NULL, 0, UserLoginThread, client, 0, NULL);
   if (threadHandle == NULL)
+  {
+    closesocket(client_socket);
     free(client);
+  }
   else
     CloseHandle(threadHandle);
 }
@@ -196,31 +217,16 @@ static DWORD WINAPI UserLoginThread(LPVOID data)
     return 0;
   }
   received = ReceiveLine(client->socket, password, sizeof(password), Password );
-
-#if 0
   if (received < 0) {
     closesocket(client->socket);
     free(client);
     return 0;
-  } else if (received) {
-    if ((terminator = strchr(password, CR)) != NULL) {
-      *terminator = '\0';
-    }
   }
-#endif
 
   /* TODO: do authentication here */
 
-  
-  telnetd_printf("User '%p' logged on\n", userID);
-#if 0
-  strcpy(client->userID, userID);
-  if (send(client->socket, logonPrompt, strlen(logonPrompt), 0) < 0) {   
-    closesocket(client->socket);
-    free(client);
-    return 0;
-  }
-#endif
+  telnetd_printf("User '%s' logged on\n", userID);
+  StringCchCopyA(client->userID, sizeof(client->userID), userID);
   RunShell(client);
   return 0;
 }
@@ -231,7 +237,7 @@ static int DoTelnetHandshake(int sock)
   int retval;
   int received;
   fd_set set;
-  struct timeval timeout = { HANDSHAKE_TIMEOUT, 0 };
+  struct timeval timeout = { 0, 500000 }; /* 500 ms */
 
   char will_echo[]=
       IAC DONT ECHO
@@ -252,25 +258,17 @@ static int DoTelnetHandshake(int sock)
     return -1;
   }
 
-  /* Now wait for client response (and ignore it) */
+  /* Wait for client response */
   FD_ZERO(&set);
   FD_SET(sock, &set);
 
-  do {
-    retval = select(0, &set, NULL, NULL, &timeout);
-    /* check for error */
-    if (retval < 0) {
-      return -1;
-      /* check for timeout */
-    } else if (retval == 0) {
-      return 0;
-    }
-    /* no error and no timeout, we have data in our sock */
+  retval = select(0, &set, NULL, NULL, &timeout);
+  if (retval > 0) {
     received = recv(sock, (char *) client_reply, sizeof(client_reply), 0);
-    if (received <= 0) {
-     return -1;
+    if (received < 0) {
+      return -1;
     }
-  } while (retval);
+  }
 
   return 0;
 }
@@ -295,12 +293,12 @@ static int ReceiveLine(int sock, char *buffer, int len, EchoMode echo)
   char           del[3] = { BS, ' ', BS };
   char           asterisk[1] = { '*' };
 
-  FD_ZERO(&set);
-  FD_SET(sock, &set);
-
   memset(buffer, '\0', len);
 
   do {
+    FD_ZERO(&set);
+    FD_SET(sock, &set);
+
     /* When we're in echo mode, we do not need a timeout */
     retval = select(0, &set, NULL, NULL, (echo ? NULL : &timeout) );
     /* check for error */
@@ -360,45 +358,50 @@ static int ReceiveLine(int sock, char *buffer, int len, EchoMode echo)
 static void RunShell(client_t *client) 
 { 
    HANDLE                threadHandle;
-   HANDLE                hChildStdinRd;
-   HANDLE                hChildStdinWr;
-   HANDLE                hChildStdoutRd;
-   HANDLE                hChildStdoutWr;
+   HANDLE                hChildStdinRd = NULL;
+   HANDLE                hChildStdinWr = NULL;
+   HANDLE                hChildStdoutRd = NULL;
+   HANDLE                hChildStdoutWr = NULL;
    STARTUPINFO           si;
    PROCESS_INFORMATION   piProcInfo;
    SECURITY_ATTRIBUTES   saAttr;
    char cmd_path[MAX_PATH];
 
-   if (!GetEnvironmentVariableA("COMSPEC", cmd_path, ARRAYSIZE(cmd_path)))
+   if (!GetSystemDirectoryA(cmd_path, ARRAYSIZE(cmd_path)))
    {
-      if (GetSystemDirectoryA(cmd_path, ARRAYSIZE(cmd_path)))
-      {
-         StringCchCatA(cmd_path, ARRAYSIZE(cmd_path), "\\cmd.exe");
-      }
-      else
-      {
-         ErrorExit("GetSystemDirectoryA failed\n");
-      }
+      StringCchCopyA(cmd_path, ARRAYSIZE(cmd_path), "C:\\ReactOS\\system32");
    }
+   StringCchCatA(cmd_path, ARRAYSIZE(cmd_path), "\\cmd.exe");
 
    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES); 
    saAttr.bInheritHandle = TRUE; 
    saAttr.lpSecurityDescriptor = NULL; 
    
    // Create a pipe for the child process's STDOUT.  
-   if (! CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) 
-      ErrorExit("Stdout pipe creation failed\n");  
+   if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) 
+   {
+      closesocket(client->socket);
+      free(client);
+      return;
+   }
 
-   if (! CreatePipe(&hChildStdinRd, &hChildStdinWr, &saAttr, 0)) 
-      ErrorExit("Stdin pipe creation failed\n");  
+   if (!CreatePipe(&hChildStdinRd, &hChildStdinWr, &saAttr, 0)) 
+   {
+      CloseHandle(hChildStdoutRd);
+      CloseHandle(hChildStdoutWr);
+      closesocket(client->socket);
+      free(client);
+      return;
+   }
 
+   SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
+   SetHandleInformation(hChildStdinWr, HANDLE_FLAG_INHERIT, 0);
 
    client->bTerminate = FALSE;
    client->bWriteToPipe = TRUE;
    client->bReadFromPipe = TRUE;
    client->hChildStdinWr = hChildStdinWr;   
    client->hChildStdoutRd = hChildStdoutRd;
-
 
    // Create the child process (the shell)
    telnetd_printf("Creating child process...\n");
@@ -411,34 +414,34 @@ static void RunShell(client_t *client)
    si.hStdOutput = hChildStdoutWr;
    si.hStdError = hChildStdoutWr;
 
-   //si.dwFlags |= STARTF_USESHOWWINDOW;
-   //si.wShowWindow = SW_SHOW;
-
    if (!CreateProcess(cmd_path,                  // executable module
                       NULL,                      // command line 
                       NULL,                      // process security attributes 
                       NULL,                      // primary thread security attributes 
                       TRUE,                      // handles are inherited 
-                      DETACHED_PROCESS +         // creation flags 
+                      DETACHED_PROCESS |         // creation flags 
                       CREATE_NEW_PROCESS_GROUP,
                       NULL,                      // use parent's environment 
                       NULL,                      // use parent's current directory 
                       &si,                       // startup info
                       &piProcInfo)) {
-     ErrorExit("Create process failed");
+     telnetd_printf("CreateProcess failed\n");
+     CloseHandle(hChildStdoutRd);
+     CloseHandle(hChildStdoutWr);
+     CloseHandle(hChildStdinRd);
+     CloseHandle(hChildStdinWr);
+     closesocket(client->socket);
+     free(client);
+     return;
    }
 
    client->hProcess = piProcInfo.hProcess;
    client->dwProcessId = piProcInfo.dwProcessId;
-
-   telnetd_printf("New child created (groupid=%lu)\n", client->dwProcessId);
+   CloseHandle(piProcInfo.hThread);
 
    // No longer need these in the parent...
-   if (!CloseHandle(hChildStdoutWr)) 
-     ErrorExit("Closing handle failed");  
-
-   if (!CloseHandle(hChildStdinRd)) 
-     ErrorExit("Closing handle failed");  
+   CloseHandle(hChildStdoutWr);
+   CloseHandle(hChildStdinRd);
 
    threadHandle = CreateThread(NULL, 0, WriteToPipeThread, client, 0, NULL);
    if (threadHandle != NULL)
@@ -566,12 +569,10 @@ static DWORD WINAPI ReadFromPipeThread(LPVOID data)
         break;
       }
 	  for (from=0, to=0; from<dwRead; from++, to++) {
+        if (chBuf[from] == '\n' && (from == 0 || chBuf[from-1] != '\r')) {
+            txBuf[to++] = '\r';
+        }
         txBuf[to] = chBuf[from];
-		if (txBuf[to] == '\n') {
-			txBuf[to] = '\r';
-			to++;
-			txBuf[to] = '\n';
-		}
 	  }
       if (send(client->socket, txBuf, to, 0) < 0) {
 		 telnetd_printf("error writing to socket\n");

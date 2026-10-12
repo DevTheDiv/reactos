@@ -1,5 +1,6 @@
 #include <debug.h>
 #include <lwip/tcpip.h>
+#include <lwip/priv/tcp_priv.h>
 
 #include "lwip_glue.h"
 
@@ -28,6 +29,7 @@ static const char * const tcp_state_str[] = {
 extern KEVENT TerminationEvent;
 extern NPAGED_LOOKASIDE_LIST MessageLookasideList;
 extern NPAGED_LOOKASIDE_LIST QueueEntryLookasideList;
+extern PKTHREAD TcpipThread;
 
 /* Required for ERR_T to NTSTATUS translation in receive error handling */
 NTSTATUS TCPTranslateError(const err_t err);
@@ -228,6 +230,8 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
         LibTCPEnqueuePacket(Connection, p);
 
         tcp_recved(pcb, p->tot_len);
+        tcp_ack_now(pcb);
+        tcp_output(pcb);
 
         TCPRecvEventHandler(arg);
     }
@@ -567,7 +571,7 @@ LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len
         msg->Input.Send.Data = dataptr;
         msg->Input.Send.DataLength = len;
 
-        if (safe)
+        if (safe || (TcpipThread && KeGetCurrentThread() == TcpipThread))
             LibTCPSendCallback(msg);
         else
             tcpip_callback_with_block(LibTCPSendCallback, msg, 1);
@@ -781,11 +785,13 @@ LibTCPCloseCallback(void *arg)
 
     if (msg->Output.Close.Error)
     {
-        /* Restore the PCB pointer */
-        msg->Input.Close.Connection->SocketContext = pcb;
-        msg->Input.Close.Connection->Closing = FALSE;
+        /* If normal close fails (e.g. out of memory for FIN segment), abort the PCB
+         * immediately so the PCB and its buffers are freed without leaking */
+        tcp_abort(pcb);
+        msg->Output.Close.Error = ERR_OK;
     }
-    else if (msg->Input.Close.Callback)
+
+    if (msg->Input.Close.Callback)
     {
         TCPFinEventHandler(msg->Input.Close.Connection, ERR_CLSD);
     }

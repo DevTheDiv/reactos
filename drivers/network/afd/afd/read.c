@@ -18,25 +18,29 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
     /* Now ensure that receive is still allowed */
     if (FCB->TdiReceiveClosed) return;
 
-    /* Check if the buffer is full */
-    if (FCB->Recv.Content == FCB->Recv.Size)
+    /* Always compact the buffer if there are consumed bytes to maximize contiguous space */
+    if (FCB->Recv.BytesUsed != 0)
     {
-        /* If there are bytes used, we can solve this problem */
-        if (FCB->Recv.BytesUsed != 0)
+        /* Reposition the unused portion to the beginning of the receive window */
+        if (FCB->Recv.Content > FCB->Recv.BytesUsed)
         {
-            /* Reposition the unused portion to the beginning of the receive window */
             RtlMoveMemory(FCB->Recv.Window,
                           FCB->Recv.Window + FCB->Recv.BytesUsed,
                           FCB->Recv.Content - FCB->Recv.BytesUsed);
-
             FCB->Recv.Content -= FCB->Recv.BytesUsed;
-            FCB->Recv.BytesUsed = 0;
         }
         else
         {
-            /* No space in the buffer to receive */
-            return;
+            FCB->Recv.Content = 0;
         }
+        FCB->Recv.BytesUsed = 0;
+    }
+
+    /* Check if the buffer is completely full */
+    if (FCB->Recv.Content == FCB->Recv.Size)
+    {
+        /* No space in the buffer to receive */
+        return;
     }
 
     AFD_DbgPrint(MID_TRACE,("Replenishing buffer\n"));
@@ -70,11 +74,6 @@ static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Info
         {
             /* Receive is closed */
             FCB->TdiReceiveClosed = TRUE;
-        }
-        else
-        {
-            /* Issue another receive IRP to keep the buffer well stocked */
-            RefillSocketBuffer(FCB);
         }
     }
     /* Receive failed with no data (unexpected closure) */
@@ -336,6 +335,8 @@ NTSTATUS NTAPI ReceiveComplete
 
     ReceiveActivity( FCB, NULL );
 
+    RefillSocketBuffer( FCB );
+
     SocketStateUnlock( FCB );
 
     return STATUS_SUCCESS;
@@ -559,6 +560,8 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     } else {
         AFD_DbgPrint(MID_TRACE,("Completed with status %x\n", Status));
     }
+
+    RefillSocketBuffer( FCB );
 
     SocketStateUnlock( FCB );
     return Status;

@@ -19,13 +19,13 @@
 
 /* See debug.h for debug/trace constants */
 //DWORD DebugTraceLevel = DEBUG_ULTRA;
-DWORD DebugTraceLevel = MIN_TRACE;
+DWORD DebugTraceLevel = MID_TRACE;
 
 #endif /* DBG */
 
-/* FIXME: should depend on SystemSize */
-ULONG AfdReceiveWindowSize = 0x2000;
-ULONG AfdSendWindowSize = 0x2000;
+/* Match Windows default 64KB TCP window and TCP_WND (0xFFFF) */
+ULONG AfdReceiveWindowSize = 0x10000;
+ULONG AfdSendWindowSize = 0x10000;
 
 void OskitDumpBuffer( PCHAR Data, UINT Len ) {
     unsigned int i;
@@ -509,6 +509,11 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         TdiDisassociateAddressFile(Qelt->Object.Object);
         ObDereferenceObject(Qelt->Object.Object);
         ZwClose(Qelt->Object.Handle);
+
+        if (Qelt->ConnInfo)
+        {
+            ExFreePoolWithTag(Qelt->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
+        }
 
         ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
     }
