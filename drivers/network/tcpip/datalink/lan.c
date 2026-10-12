@@ -1015,7 +1015,18 @@ VOID LANTransmit(
 
     RtlCopyMemory(Data + Adapter->HeaderSize, OldData, OldSize);
 
-    (*PC(NdisPacket)->DLComplete)(PC(NdisPacket)->Context, NdisPacket, NDIS_STATUS_SUCCESS);
+    /* NdisPacket (the caller's packet) is only completed once we actually
+     * know the outcome of the real hardware send below -- see the
+     * DLComplete call after NdisSend. Completing it as SUCCESS here,
+     * before NdisSend even runs, used to mean that if the miniport
+     * synchronously returned NDIS_STATUS_RESOURCES (e.g. e1000's transmit
+     * descriptor ring was momentarily full), the data was silently
+     * dropped: the caller had already been told "sent" and XmitPacket's
+     * own completion (ProtocolSendComplete) just frees the buffer without
+     * telling anyone it failed. There was no retry and no error
+     * propagation, so the only recovery was the remote peer's own TCP
+     * retransmission timer -- which is exactly the multi-second stall
+     * pattern observed under transmit-ring pressure. */
 
     switch (Adapter->Media) {
         case NdisMedium802_3:
@@ -1074,20 +1085,62 @@ VOID LANTransmit(
     /* Update interface stats */
     Interface->Stats.OutBytes += Size;
 
-	TcpipAcquireSpinLock( &Adapter->Lock, &OldIrql );
-	TI_DbgPrint(MID_TRACE, ("NdisSend\n"));
-	NdisSend(&NdisStatus, Adapter->NdisHandle, XmitPacket);
-	TI_DbgPrint(MID_TRACE, ("NdisSend %s\n",
-				NdisStatus == NDIS_STATUS_PENDING ?
-				"Pending" : "Complete"));
-	TcpipReleaseSpinLock( &Adapter->Lock, OldIrql );
+    {
+        /* NDIS_STATUS_RESOURCES means the miniport's transmit ring is
+         * momentarily full (e.g. e1000's NUM_TRANSMIT_DESCRIPTORS slots are
+         * all pending completion). That's normally a microsecond-scale
+         * condition -- the completion interrupt's DPC frees descriptors as
+         * the hardware finishes sending -- so retry briefly with the lock
+         * released each time (the DPC that drains the ring runs at
+         * DISPATCH_LEVEL and can't preempt us while we hold Adapter->Lock,
+         * so we must not spin while holding it). Only give up, and only
+         * then report failure, if the ring genuinely doesn't drain in a
+         * reasonable window. */
+        ULONG RetriesLeft = 100;
+
+        for (;;)
+        {
+            TcpipAcquireSpinLock( &Adapter->Lock, &OldIrql );
+            TI_DbgPrint(MID_TRACE, ("NdisSend\n"));
+            NdisSend(&NdisStatus, Adapter->NdisHandle, XmitPacket);
+            TI_DbgPrint(MID_TRACE, ("NdisSend %s\n",
+                        NdisStatus == NDIS_STATUS_PENDING ?
+                        "Pending" : "Complete"));
+            TcpipReleaseSpinLock( &Adapter->Lock, OldIrql );
+
+            if (NdisStatus != NDIS_STATUS_RESOURCES || --RetriesLeft == 0)
+                break;
+
+            KeStallExecutionProcessor(50);
+        }
+    }
 
 	/* I had a talk with vizzini: these really ought to be here.
 	 * we're supposed to see these completed by ndis *only* when
 	 * status_pending is returned.  Note that this is different from
 	 * the situation with IRPs. */
+    if (NdisStatus == NDIS_STATUS_PENDING || NdisStatus == NDIS_STATUS_SUCCESS)
+    {
+        /* Accepted (or already sent) -- the caller's packet genuinely got
+         * through (or is on its way). XmitPacket's own completion fires
+         * separately via ProtocolSendComplete/NdisSend's async callback for
+         * the PENDING case; for the synchronous SUCCESS case we still need
+         * to run that same cleanup ourselves, matching the original code's
+         * handling. */
         if (NdisStatus != NDIS_STATUS_PENDING)
             ProtocolSendComplete((NDIS_HANDLE)Context, XmitPacket, NdisStatus);
+
+        (*PC(NdisPacket)->DLComplete)(PC(NdisPacket)->Context, NdisPacket, NDIS_STATUS_SUCCESS);
+    }
+    else
+    {
+        /* Genuinely failed (including resource exhaustion that never
+         * cleared) -- tell the caller so it can be retransmitted at the
+         * protocol level instead of silently vanishing. XmitPacket was
+         * never accepted by NdisSend, so we own freeing it. */
+        FreeNdisPacket(XmitPacket);
+        (*PC(NdisPacket)->DLComplete)(PC(NdisPacket)->Context, NdisPacket, NdisStatus);
+    }
 }
 
 static NTSTATUS

@@ -53,17 +53,4 @@ WSPJoinLeaf(
     return (SOCKET)0;
 }
 
-BOOL
-WSPAPI
-WSPDisconnectEx(
-  IN SOCKET hSocket,
-  IN LPOVERLAPPED lpOverlapped,
-  IN DWORD dwFlags,
-  IN DWORD reserved)
-{
-    UNIMPLEMENTED;
-
-    return FALSE;
-}
-
 /* EOF */

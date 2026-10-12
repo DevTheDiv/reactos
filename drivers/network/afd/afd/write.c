@@ -10,6 +10,8 @@
 
 #include "afd.h"
 
+static VOID TcpSendArm( PAFD_FCB FCB );
+
 static IO_COMPLETION_ROUTINE SendComplete;
 static NTSTATUS NTAPI SendComplete
 ( PDEVICE_OBJECT DeviceObject,
@@ -103,6 +105,13 @@ static NTSTATUS NTAPI SendComplete
                    FCB->Send.Window + Irp->IoStatus.Information,
                    FCB->Send.BytesUsed - Irp->IoStatus.Information );
 
+    /* The bytes TDI just accepted are no longer buffered in the window.
+     * Without this, BytesUsed stays stale (never shrinks), so the "more
+     * data waiting" check below keeps re-dispatching the same already-sent
+     * bytes as a phantom retransmit with no matching queued IRP, which
+     * then fails ASSERT(SendLength == 0) on the next completion. */
+    FCB->Send.BytesUsed -= Irp->IoStatus.Information;
+
     TotalBytesProcessed = 0;
     SendLength = Irp->IoStatus.Information;
     HaltSendQueue = FALSE;
@@ -130,7 +139,6 @@ static NTSTATUS NTAPI SendComplete
             NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)TotalBytesCopied;
 
             /* Update the state variables */
-            FCB->Send.BytesUsed -= SendLength;
             TotalBytesProcessed += SendLength;
             SendLength = 0;
 
@@ -143,7 +151,6 @@ static NTSTATUS NTAPI SendComplete
 
         NextIrp->IoStatus.Status = Irp->IoStatus.Status;
 
-        FCB->Send.BytesUsed -= TotalBytesCopied;
         TotalBytesProcessed += TotalBytesCopied;
         SendLength -= TotalBytesCopied;
 
@@ -217,30 +224,38 @@ static NTSTATUS NTAPI SendComplete
         break;
     }
 
-    if (FCB->Send.Size - FCB->Send.BytesUsed != 0 && !FCB->SendClosed)
-    {
-        FCB->PollState |= AFD_EVENT_SEND;
-        FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
-        PollReeval( FCB->DeviceExt, FCB->FileObject );
-    }
-    else
-    {
-        FCB->PollState &= ~AFD_EVENT_SEND;
-    }
+    AfdTransitionFlowState( FCB, AFD_EVT_SEND_TDI_COMPLETE, NULL );
 
 
     /* Some data is still waiting */
-    if( FCB->Send.BytesUsed )
+    if( FCB->Send.BytesUsed && Irp->IoStatus.Information > 0 )
     {
-        Status = TdiSend( &FCB->SendIrp.InFlightRequest,
-                          FCB->Connection.Object,
-                          0,
-                          FCB->Send.Window,
-                          FCB->Send.BytesUsed,
-                          SendComplete,
-                          FCB );
+        /* Only keep driving the pipe if this completion actually made
+         * progress. If TDI synchronously "succeeds" a send with 0 bytes
+         * transferred (e.g. the peer's receive window is currently
+         * exhausted), immediately resubmitting the identical Window/
+         * BytesUsed would just get the same 0-byte answer again -- a tight
+         * spin that never yields back to the scheduler. Stop here instead;
+         * the next real send-ready signal (a window update arriving via
+         * the receive path, or a new user write) will re-arm it. */
+        if( FCB->TcpSendArmInProgress )
+        {
+            /* We were invoked synchronously, nested inside TcpSendArm's own
+             * TdiSend call below us on this same stack. Don't relaunch from
+             * here -- that would recurse unboundedly if the transport keeps
+             * completing synchronously across a deep send backlog. Just
+             * flag it; the enclosing loop will relaunch. */
+            FCB->TcpSendRelaunchPending = TRUE;
+        }
+        else
+        {
+            /* True asynchronous completion (or the initial dispatch from
+             * AfdConnectedSocketWriteData) -- we're the outermost frame, so
+             * we own arming the next send ourselves. */
+            TcpSendArm( FCB );
+        }
     }
-    else
+    else if( !FCB->Send.BytesUsed )
     {
         /* Nothing is waiting so try to complete a pending disconnect */
         RetryDisconnectCompletion(FCB);
@@ -249,6 +264,38 @@ static NTSTATUS NTAPI SendComplete
     SocketStateUnlock( FCB );
 
     return STATUS_SUCCESS;
+}
+
+/* Arms (or re-arms) the TCP send request for FCB. Must be called with the
+ * FCB state lock held. Loops instead of recursing if TdiSend's completion
+ * routine (SendComplete) keeps firing synchronously across a backlog of
+ * queued send IRPs. */
+static VOID TcpSendArm( PAFD_FCB FCB ) {
+    NTSTATUS Status;
+
+    while( FCB->Send.BytesUsed && !FCB->SendIrp.InFlightRequest ) {
+        FCB->TcpSendRelaunchPending = FALSE;
+        FCB->TcpSendArmInProgress = TRUE;
+
+        Status = TdiSend( &FCB->SendIrp.InFlightRequest,
+                          FCB->Connection.Object,
+                          0,
+                          FCB->Send.Window,
+                          FCB->Send.BytesUsed,
+                          SendComplete,
+                          FCB );
+
+        FCB->TcpSendArmInProgress = FALSE;
+
+        if( Status != STATUS_PENDING && Status != STATUS_SUCCESS )
+        {
+            FCB->SendIrp.InFlightRequest = NULL;
+            break;
+        }
+
+        if( !FCB->TcpSendRelaunchPending )
+            break;
+    }
 }
 
 static IO_COMPLETION_ROUTINE PacketSocketSendComplete;
@@ -273,6 +320,11 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     ASSERT(FCB->SendIrp.InFlightRequest == Irp);
     FCB->SendIrp.InFlightRequest = NULL;
     /* Request is not in flight any longer */
+
+    /* Tell a still-executing dispatch routine (if TdiSendDatagram completed
+     * us synchronously, we're nested inside its own call right now) that it
+     * must not also complete this user IRP itself. */
+    FCB->DatagramSendCompletedSync = TRUE;
 
     if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
         /* Cleanup our IRP queue because the FCB is being destroyed */
@@ -377,6 +429,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 {
                     AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
                 }
+                FCB->DatagramSendCompletedSync = FALSE;
                 Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
                                          FCB->AddressFile.Object,
                                          SendReq->BufferArray[0].buf,
@@ -384,8 +437,14 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                          TargetAddress,
                                          PacketSocketSendComplete,
                                          FCB);
-                if (Status != STATUS_PENDING)
+                if (Status != STATUS_PENDING && !FCB->DatagramSendCompletedSync)
                 {
+                    /* TdiSendDatagram never reached TdiCall (e.g. zero-length
+                     * send or a pre-dispatch failure) -- PacketSocketSendComplete
+                     * was never and will never be invoked, so we must complete
+                     * the user IRP ourselves. If DatagramSendCompletedSync is
+                     * TRUE instead, it already did this (possibly having run
+                     * synchronously inside the call above) and owns the IRP. */
                     NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                     Irp->IoStatus.Status = Status;
                     Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
@@ -543,16 +602,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }
 
-    if (SpaceAvail)
-    {
-        FCB->PollState |= AFD_EVENT_SEND;
-        FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
-        PollReeval( FCB->DeviceExt, FCB->FileObject );
-    }
-    else
-    {
-        FCB->PollState &= ~AFD_EVENT_SEND;
-    }
+    AfdTransitionFlowState( FCB, AFD_EVT_SEND_USER_POSTED, NULL );
 
     /* We use the IRP tail for some temporary storage here */
     Irp->Tail.Overlay.DriverContext[3] = (PVOID)Irp->IoStatus.Information;
@@ -663,6 +713,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             {
                 AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
             }
+            FCB->DatagramSendCompletedSync = FALSE;
             Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
                                      FCB->AddressFile.Object,
                                      SendReq->BufferArray[0].buf,
@@ -670,8 +721,11 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                      TargetAddress,
                                      PacketSocketSendComplete,
                                      FCB);
-            if (Status != STATUS_PENDING)
+            if (Status != STATUS_PENDING && !FCB->DatagramSendCompletedSync)
             {
+                /* See the identical comment in AfdConnectedSocketWriteData's
+                 * connectionless branch: only complete here if the completion
+                 * routine provably never ran (no IRP was ever dispatched). */
                 NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                 Irp->IoStatus.Status = Status;
                 Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);

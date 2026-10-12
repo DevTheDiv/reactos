@@ -358,16 +358,35 @@ VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount ) {
 }
 
 BOOLEAN SocketAcquireStateLock( PAFD_FCB FCB ) {
+    NTSTATUS Status;
     if( !FCB ) return FALSE;
 
-    return !KeWaitForMutexObject(&FCB->Mutex,
-                                 Executive,
-                                 KernelMode,
-                                 FALSE,
-                                 NULL);
+    Status = KeWaitForMutexObject(&FCB->Mutex,
+                                  Executive,
+                                  KernelMode,
+                                  FALSE,
+                                  NULL);
+    if (!Status)
+    {
+        /* KMUTEX allows recursive acquisition by the same thread; only the
+         * outermost acquire needs to (re)stamp CurrentThread, but it's
+         * harmless to restamp it with the same value on nested acquires
+         * too -- what matters is the matching unlock below not clearing it
+         * until the recursion count actually returns to zero. */
+        FCB->CurrentThread = KeGetCurrentThread();
+        FCB->MutexRecursionCount++;
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 VOID SocketStateUnlock( PAFD_FCB FCB ) {
+    if (!FCB) return;
+    if (--FCB->MutexRecursionCount == 0)
+    {
+        FCB->CurrentThread = NULL;
+    }
     KeReleaseMutex(&FCB->Mutex, FALSE);
 }
 

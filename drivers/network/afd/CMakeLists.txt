@@ -14,6 +14,7 @@ list(APPEND SOURCE
     afd/main.c
     afd/read.c
     afd/select.c
+    afd/state.c
     ../tdihelpers/tdi.c
     ../tdihelpers/tdiconn.c
     afd/write.c

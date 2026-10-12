@@ -10,7 +10,7 @@
 
 #include "afd.h"
 
-static VOID RefillSocketBuffer( PAFD_FCB FCB )
+VOID RefillSocketBuffer( PAFD_FCB FCB )
 {
     /* Make sure nothing's in flight first */
     if (FCB->ReceiveIrp.InFlightRequest) return;
@@ -231,7 +231,6 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
         IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]) ) {
         FCB->PollState |= AFD_EVENT_RECEIVE;
         FCB->PollStatus[FD_READ_BIT] = STATUS_SUCCESS;
-        PollReeval( FCB->DeviceExt, FCB->FileObject );
     }
     else
     {
@@ -250,8 +249,9 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
             FCB->PollState |= AFD_EVENT_CLOSE;
         }
         FCB->PollStatus[FD_CLOSE_BIT] = FCB->LastReceiveStatus;
-        PollReeval(FCB->DeviceExt, FCB->FileObject);
     }
+
+    AfdTransitionFlowState( FCB, AFD_EVT_RECV_USER_SATISFIED, NULL );
 
     AFD_DbgPrint(MID_TRACE,("RetStatus for irp %p is %x\n", Irp, RetStatus));
 
@@ -563,9 +563,14 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     RefillSocketBuffer( FCB );
 
+    /* Re-enable receive event and re-evaluate readiness */
+    AfdTransitionFlowState( FCB, AFD_EVT_RECV_USER_SATISFIED, NULL );
+
     SocketStateUnlock( FCB );
     return Status;
 }
+
+static VOID PacketSocketArmReceive( PAFD_FCB FCB );
 
 NTSTATUS NTAPI
 PacketSocketRecvComplete(
@@ -709,8 +714,35 @@ PacketSocketRecvComplete(
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
 
     if( NT_SUCCESS(Irp->IoStatus.Status) && FCB->Recv.Content < FCB->Recv.Size ) {
-        /* Now relaunch the datagram request */
-        Status = TdiReceiveDatagram
+        if( FCB->DatagramRecvArmInProgress ) {
+            /* We were invoked synchronously, nested inside PacketSocketArmReceive's
+             * own call below us on this same stack. Don't relaunch from here --
+             * that would recurse unboundedly if the transport keeps completing
+             * synchronously. Just flag it; the enclosing loop will relaunch. */
+            FCB->DatagramRecvRelaunchPending = TRUE;
+        } else {
+            /* True asynchronous completion -- we're the outermost frame, so we
+             * own arming the next receive ourselves. */
+            PacketSocketArmReceive( FCB );
+        }
+    }
+
+    SocketStateUnlock( FCB );
+
+    return STATUS_SUCCESS;
+}
+
+/* Arms (or re-arms) the datagram receive request for FCB. Must be called with
+ * the FCB state lock held. Loops instead of recursing if TdiReceiveDatagram's
+ * completion routine (PacketSocketRecvComplete) keeps firing synchronously. */
+static VOID PacketSocketArmReceive( PAFD_FCB FCB ) {
+    while( !FCB->ReceiveIrp.InFlightRequest &&
+           !FCB->TdiReceiveClosed &&
+           FCB->Recv.Content < FCB->Recv.Size ) {
+        FCB->DatagramRecvRelaunchPending = FALSE;
+        FCB->DatagramRecvArmInProgress = TRUE;
+
+        (VOID)TdiReceiveDatagram
             ( &FCB->ReceiveIrp.InFlightRequest,
               FCB->AddressFile.Object,
               0,
@@ -719,11 +751,12 @@ PacketSocketRecvComplete(
               FCB->AddressFrom,
               PacketSocketRecvComplete,
               FCB );
+
+        FCB->DatagramRecvArmInProgress = FALSE;
+
+        if( !FCB->DatagramRecvRelaunchPending )
+            break;
     }
-
-    SocketStateUnlock( FCB );
-
-    return STATUS_SUCCESS;
 }
 
 NTSTATUS NTAPI
@@ -785,6 +818,8 @@ AfdPacketSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             InsertHeadList(&FCB->DatagramList,
                            &DatagramRecv->ListEntry);
         }
+
+        FCB->EventSelectDisabled &= ~AFD_EVENT_RECEIVE;
 
         if (!IsListEmpty(&FCB->DatagramList))
         {

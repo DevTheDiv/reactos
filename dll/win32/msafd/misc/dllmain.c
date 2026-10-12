@@ -2471,6 +2471,63 @@ WSPShutdown(SOCKET Handle,
     return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
 }
 
+BOOL
+WSPAPI
+WSPDisconnectEx(
+    IN SOCKET hSocket,
+    IN LPOVERLAPPED lpOverlapped,
+    IN DWORD dwFlags,
+    IN DWORD reserved)
+{
+    IO_STATUS_BLOCK DummyIOSB;
+    PIO_STATUS_BLOCK IOSB = &DummyIOSB;
+    AFD_DISCONNECT_INFO DisconnectInfo;
+    PSOCKET_INFORMATION Socket;
+    NTSTATUS Status;
+
+    if (!lpOverlapped)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* Get the Socket Structure associate to this Socket */
+    Socket = GetSocketStructure(hSocket);
+    if (!Socket)
+    {
+        SetLastError(WSAENOTSOCK);
+        return FALSE;
+    }
+
+    /* A graceful DisconnectEx closes both directions, same as SD_BOTH via
+     * WSPShutdown above. TF_REUSE_SOCKET (allowing the handle to be recycled
+     * for a later AcceptEx) is not supported; the disconnect itself still
+     * completes normally either way. */
+    DisconnectInfo.DisconnectType = AFD_DISCONNECT_SEND | AFD_DISCONNECT_RECV;
+    DisconnectInfo.Timeout.QuadPart = -1000000LL;
+
+    Socket->SharedData->SendShutdown = TRUE;
+    Socket->SharedData->ReceiveShutdown = TRUE;
+
+    IOSB = (PIO_STATUS_BLOCK)lpOverlapped;
+    IOSB->Status = STATUS_PENDING;
+
+    /* Send IOCTL, overlapped */
+    Status = NtDeviceIoControlFile((HANDLE)hSocket,
+                                   lpOverlapped->hEvent,
+                                   NULL,
+                                   lpOverlapped->hEvent ? NULL : lpOverlapped,
+                                   IOSB,
+                                   IOCTL_AFD_DISCONNECT,
+                                   &DisconnectInfo,
+                                   sizeof(DisconnectInfo),
+                                   NULL,
+                                   0);
+
+    SetLastError(TranslateNtStatusError(Status));
+
+    return Status == STATUS_SUCCESS;
+}
 
 INT
 WSPAPI

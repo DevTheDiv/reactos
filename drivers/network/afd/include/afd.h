@@ -166,6 +166,15 @@ typedef struct _AFD_FCB {
     UINT Flags, GroupID, GroupType;
     KIRQL OldIrql;
     PVOID CurrentThread;
+    /* FCB->Mutex (KMUTEX) allows recursive same-thread acquisition. This
+     * counts nested SocketAcquireStateLock/SocketStateUnlock pairs so
+     * CurrentThread is only cleared when the outermost call actually
+     * releases the mutex -- see lock.c. Without it, an inner nested
+     * unlock (e.g. a synchronously-completing TDI relaunch re-entering
+     * ReceiveComplete/SendComplete) wipes CurrentThread out from under
+     * the still-running outer frame, tripping AfdTransitionFlowState's
+     * locking-contract ASSERT. */
+    LONG MutexRecursionCount;
     PFILE_OBJECT FileObject;
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
@@ -178,6 +187,20 @@ typedef struct _AFD_FCB {
     AFD_TDI_OBJECT AddressFile, Connection;
     AFD_IN_FLIGHT_REQUEST ConnectIrp, ListenIrp, ReceiveIrp, SendIrp, DisconnectIrp;
     PIRP AcceptIrp;
+    /* Datagram (UDP) completion-ownership tracking. See write.c/read.c
+     * PacketSocketSendComplete/PacketSocketRecvComplete/PacketSocketArmReceive:
+     * these flags let a dispatch routine tell whether its TdiSendDatagram/
+     * TdiReceiveDatagram call already ran its completion routine synchronously,
+     * so we never complete/relaunch the same request twice or recurse into the
+     * completion routine unboundedly. */
+    BOOLEAN DatagramSendCompletedSync;
+    BOOLEAN DatagramRecvRelaunchPending;
+    BOOLEAN DatagramRecvArmInProgress;
+    /* Same pattern, for TCP's SendComplete/TcpSendArm (write.c): avoids
+     * unbounded stack recursion when TdiSend keeps completing synchronously
+     * across a backlog of queued send IRPs. */
+    BOOLEAN TcpSendRelaunchPending;
+    BOOLEAN TcpSendArmInProgress;
     AFD_DATA_WINDOW Send, Recv;
     KMUTEX Mutex;
     PKEVENT EventSelect;
@@ -207,6 +230,27 @@ typedef struct _AFD_FCB {
     LIST_ENTRY DatagramList;
     LIST_ENTRY PendingConnections;
 } AFD_FCB, *PAFD_FCB;
+
+typedef enum _AFD_FLOW_EVENT {
+    /* Receive Events */
+    AFD_EVT_RECV_CONNECTED,         /* Socket connected/accepted */
+    AFD_EVT_RECV_TDI_COMPLETE,      /* TdiReceive completed by transport */
+    AFD_EVT_RECV_USER_POSTED,       /* User-mode read IRP posted */
+    AFD_EVT_RECV_USER_SATISFIED,    /* Data copied to user buffer */
+    AFD_EVT_RECV_REMOTE_FIN,        /* FIN received from peer */
+
+    /* Send Events */
+    AFD_EVT_SEND_USER_POSTED,       /* User-mode send IRP queued */
+    AFD_EVT_SEND_TDI_COMPLETE,      /* TdiSend completed by transport */
+    AFD_EVT_SEND_SHUTDOWN,          /* Controlled send disconnect initiated */
+
+    /* EventSelect Management */
+    AFD_EVT_EVENT_SELECT_SET,       /* IOCTL_AFD_EVENT_SELECT called */
+    AFD_EVT_EVENTS_ENUMERATED       /* IOCTL_AFD_ENUM_NETWORK_EVENTS called */
+} AFD_FLOW_EVENT;
+
+/* state.c */
+VOID AfdTransitionFlowState( PAFD_FCB FCB, AFD_FLOW_EVENT Event, PVOID Context );
 
 /* bind.c */
 
@@ -317,6 +361,8 @@ VOID RetryDisconnectCompletion(PAFD_FCB FCB);
 BOOLEAN CheckUnlockExtraBuffers(PAFD_FCB FCB, PIO_STACK_LOCATION IrpSp);
 
 /* read.c */
+
+VOID RefillSocketBuffer( PAFD_FCB FCB );
 
 IO_COMPLETION_ROUTINE AcceptExReceiveComplete;
 

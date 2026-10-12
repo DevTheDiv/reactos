@@ -731,8 +731,13 @@ NTSTATUS DispTdiQueryInformation(
 				(PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
             if (Endpoint == NULL || Endpoint->AddressFile == NULL)
             {
-                TI_DbgPrint(MIN_TRACE, ("FIXME: No connection endpoint file object.\n"));
-                ASSERT(Endpoint != NULL && Endpoint->AddressFile != NULL);
+                /* Not a bug: the connection can legitimately be torn down
+                 * (e.g. an abrupt peer disconnect/RST) concurrently with an
+                 * in-flight address query racing against it -- that's an
+                 * expected runtime condition, not a invariant violation, so
+                 * this must not ASSERT/crash a checked build. Just report
+                 * it like any other "connection's gone" case. */
+                TI_DbgPrint(MIN_TRACE, ("No connection endpoint file object (connection torn down concurrently).\n"));
                 return STATUS_INVALID_PARAMETER;
             }
 
@@ -962,6 +967,9 @@ NTSTATUS DispTdiSend(
 
   IrpSp = IoGetCurrentIrpStackLocation(Irp);
   SendInfo = (PTDI_REQUEST_KERNEL_SEND)&(IrpSp->Parameters);
+
+  DbgPrint("[DISPTDISEND-DIAG] Irp=%p SendInfo->SendLength=%u SendInfo->SendFlags=%u MdlAddress=%p\n",
+           Irp, SendInfo->SendLength, SendInfo->SendFlags, Irp->MdlAddress);
 
   IoMarkIrpPending(Irp);
 

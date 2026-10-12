@@ -227,11 +227,17 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
 
     if (p)
     {
+        DbgPrint("[TCPRECV-DIAG] pcb=%p tot_len=%u rcv_wnd(before)=%u rcv_ann_wnd(before)=%u\n",
+                 pcb, p->tot_len, pcb->rcv_wnd, pcb->rcv_ann_wnd);
+
         LibTCPEnqueuePacket(Connection, p);
 
         tcp_recved(pcb, p->tot_len);
         tcp_ack_now(pcb);
         tcp_output(pcb);
+
+        DbgPrint("[TCPRECV-DIAG] after: rcv_wnd=%u rcv_ann_wnd=%u snd_wnd=%u\n",
+                 pcb->rcv_wnd, pcb->rcv_ann_wnd, pcb->snd_wnd);
 
         TCPRecvEventHandler(arg);
     }
@@ -520,8 +526,15 @@ LibTCPSendCallback(void *arg)
         goto done;
     }
 
+    msg->Output.Send.Information = 0;
+
     SendFlags = TCP_WRITE_FLAG_COPY;
     SendLength = msg->Input.Send.DataLength;
+
+    DbgPrint("[TCPSEND-DIAG] pcb=%p state=%d (%s) sndbuf=%u snd_queuelen=%u requested=%u\n",
+             pcb, pcb->state, tcp_debug_state_str(pcb->state),
+             tcp_sndbuf(pcb), pcb->snd_queuelen, SendLength);
+
     if (tcp_sndbuf(pcb) == 0)
     {
         /* No buffer space so return pending */
@@ -541,6 +554,10 @@ LibTCPSendCallback(void *arg)
                                        msg->Input.Send.Data,
                                        SendLength,
                                        SendFlags);
+
+    DbgPrint("[TCPSEND-DIAG] tcp_write returned err=%d for SendLength=%u\n",
+             msg->Output.Send.Error, SendLength);
+
     if (msg->Output.Send.Error == ERR_OK)
     {
         /* Queued successfully so try to send it */
@@ -554,11 +571,13 @@ LibTCPSendCallback(void *arg)
     }
 
 done:
+    DbgPrint("[TCPSEND-DIAG] done: Error=%d Information=%u\n",
+             msg->Output.Send.Error, msg->Output.Send.Information);
     KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
 }
 
 err_t
-LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe)
+LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const ULONG len, ULONG *sent, const int safe)
 {
     err_t ret;
     struct lwip_callback_msg *msg;
