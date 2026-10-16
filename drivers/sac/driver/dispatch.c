@@ -12,8 +12,6 @@
 
 /* GLOBALS ********************************************************************/
 
-LONG TimerDpcCount;
-
 /* FUNCTIONS ******************************************************************/
 
 NTSTATUS
@@ -56,6 +54,16 @@ Dispatch(IN PDEVICE_OBJECT DeviceObject,
     return STATUS_NOT_IMPLEMENTED;
 }
 
+BOOLEAN
+NTAPI
+SerialBufferIsFull(VOID)
+{
+    /* The consumer clears slots it reads, so the ring is full when the next
+       producer slot is already occupied */
+    return (SerialPortBuffer[(SerialPortProducerIndex + 1) &
+                             (SAC_SERIAL_PORT_BUFFER_SIZE - 1)] != ANSI_NULL);
+}
+
 VOID
 NTAPI
 TimerDpcRoutine(IN PKDPC Dpc,
@@ -69,8 +77,12 @@ TimerDpcRoutine(IN PKDPC Dpc,
     NTSTATUS Status;
     PSAC_DEVICE_EXTENSION SacExtension;
 
-    /* Update our counter */
-    _InterlockedExchangeAdd(&TimerDpcCount, 1);
+    SacExtension = DeferredContext;
+
+    /* Mark this DPC as in-flight, so a shutdown that cancels the timer can
+       wait for an already-running DPC to finish (fbtpnp HandleStopDevice
+       pattern) */
+    KeClearEvent(&SacExtension->DpcCompletionEvent);
 
     /* Set defaults and loop for new characters */
     GotChar = FALSE;
@@ -88,7 +100,13 @@ TimerDpcRoutine(IN PKDPC Dpc,
         if (!NT_SUCCESS(Status)) break;
         if (!ByteValue.Value) break;
 
-        /* Update the serial port buffer */
+        /* Update the serial port buffer, unless it is already full */
+        if (SerialBufferIsFull())
+        {
+            GotChar = TRUE;
+            break;
+        }
+
         SerialPortBuffer[SerialPortProducerIndex] = ByteValue.Value;
         GotChar = TRUE;
 
@@ -102,9 +120,11 @@ TimerDpcRoutine(IN PKDPC Dpc,
     if (GotChar)
     {
         /* Signal the worker thread that there is work to do */
-        SacExtension = DeferredContext;
         KeSetEvent(&SacExtension->Event, SacExtension->PriorityBoost, FALSE);
     }
+
+    /* This DPC has run to completion */
+    KeSetEvent(&SacExtension->DpcCompletionEvent, 0, FALSE);
 }
 
 VOID

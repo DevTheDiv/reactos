@@ -514,6 +514,7 @@ typedef struct _SAC_DEVICE_EXTENSION
     PEPROCESS Process;
     KSPIN_LOCK Lock;
     KEVENT RundownEvent;
+    KEVENT DpcCompletionEvent;
     KEVENT Event;
     HANDLE WorkerThreadHandle;
     KEVENT WorkerThreadEvent;

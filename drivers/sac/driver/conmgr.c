@@ -579,7 +579,7 @@ ConMgrSerialPortConsumer(VOID)
     CHAR ReadBuffer[2];
     ULONG ReadBufferSize, i;
     WCHAR StringBuffer[2];
-    SAC_DBG(SAC_DBG_MACHINE, "SAC TimerDpcRoutine: Entering.\n"); //bug
+    SAC_DBG(SAC_DBG_MACHINE, "SAC ConMgrSerialPortConsumer: Entering.\n");
 
     /* Acquire the manager lock and make sure a channel is selected */
     SacAcquireMutexLock();
@@ -827,7 +827,7 @@ DoLineParsing:
 
     /* We're done, release the lock */
     SacReleaseMutexLock();
-    SAC_DBG(SAC_DBG_MACHINE, "SAC TimerDpcRoutine: Exiting.\n"); //bug
+    SAC_DBG(SAC_DBG_MACHINE, "SAC ConMgrSerialPortConsumer: Exiting.\n");
 }
 
 VOID
@@ -870,6 +870,13 @@ ConMgrWorkerProcessEvents(IN PSAC_DEVICE_EXTENSION DeviceExtension)
         /* Clear the serial port consumer state */
         ExecutePostConsumerCommand = Nothing;
         ExecutePostConsumerCommandData = NULL;
+
+        /* If a shutdown was requested, complete the rundown handshake so
+           FreeDeviceData's KeWaitForSingleObject(RundownEvent) returns */
+        if (DeviceExtension->Rundown)
+        {
+            KeSetEvent(&DeviceExtension->RundownEvent, 0, FALSE);
+        }
     }
 }
 

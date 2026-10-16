@@ -185,9 +185,18 @@ FreeDeviceData(IN PDEVICE_OBJECT DeviceObject)
     /* Cancel it */
     KeCancelTimer(&DeviceExtension->Timer);
 
+    /* Make sure that if a DPC was fired before we called cancel timer, then
+       the DPC and work-time have run to their completion (fbtpnp pattern) */
+    KeWaitForSingleObject(&DeviceExtension->DpcCompletionEvent,
+                          Executive,
+                          KernelMode,
+                          FALSE,
+                          NULL);
+
     /* Reacquire the lock*/
     KeAcquireSpinLock(&DeviceExtension->Lock, &OldIrql);
     DeviceExtension->RundownInProgress = FALSE;
+    DeviceExtension->Rundown = TRUE;
 
     /* Now do the last rundown attempt, we should be the only ones here */
     KeInitializeEvent(&DeviceExtension->RundownEvent, SynchronizationEvent, 0);
@@ -242,6 +251,12 @@ InitializeDeviceData(IN PDEVICE_OBJECT DeviceObject)
     KeInitializeDpc(&DeviceExtension->Dpc, TimerDpcRoutine, DeviceExtension);
     KeInitializeSpinLock(&DeviceExtension->Lock);
     KeInitializeEvent(&DeviceExtension->Event, SynchronizationEvent, FALSE);
+    /* Signaled means "no DPC in flight" -- start signaled since the timer
+       hasn't fired yet, otherwise a rundown before the first DPC fires
+       would wait on this event forever */
+    KeInitializeEvent(&DeviceExtension->DpcCompletionEvent,
+                      SynchronizationEvent,
+                      TRUE);
     InitializeListHead(&DeviceExtension->List);
 
     /* Attempt to enable HDL support */
@@ -319,7 +334,10 @@ InitializeDeviceData(IN PDEVICE_OBJECT DeviceObject)
         SAC_DBG(SAC_DBG_ENTRY_EXIT, "Exiting (6) with status FALSE\n");
         DeviceExtension->PriorityFail = TRUE;
 
-        /* Initialize rundown and wait for the thread to do it */
+        /* Initialize rundown and wait for the thread to do it. Set Rundown
+           so ConMgrWorkerProcessEvents' handshake signals RundownEvent for
+           us too, same as the FreeDeviceData teardown path. */
+        DeviceExtension->Rundown = TRUE;
         KeInitializeEvent(&DeviceExtension->RundownEvent, SynchronizationEvent, FALSE);
         KeSetEvent(&DeviceExtension->Event, DeviceExtension->PriorityBoost, FALSE);
         Status = KeWaitForSingleObject(&DeviceExtension->RundownEvent,
