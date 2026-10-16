@@ -124,8 +124,12 @@ DispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject,
                 break;
             }
 
+            /* Go through the locked wrapper, not the raw vtable pointer --
+               this races against the kernel's own serial-input thread
+               (ChannelIWrite in DoLineParsing) otherwise, corrupting the
+               shared IBuffer/IBufferIndex under fast/bursty typing */
             Status = (OutputBufferLength > 0)
-                      ? Channel->ChannelInputRead(Channel, (PCHAR)SystemBuffer, OutputBufferLength, &BytesRead)
+                      ? ChannelIRead(Channel, (PCHAR)SystemBuffer, OutputBufferLength, &BytesRead)
                       : STATUS_SUCCESS;
             Irp->IoStatus.Information = BytesRead;
             break;
@@ -141,8 +145,10 @@ DispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject,
                 break;
             }
 
+            /* Go through the locked wrapper, not the raw vtable pointer --
+               see IOCTL_SAC_CHANNEL_READ for why */
             Status = (InputBufferLength > 0)
-                      ? Channel->ChannelOutputWrite(Channel, (PCHAR)SystemBuffer, InputBufferLength)
+                      ? ChannelOWrite(Channel, (PCHAR)SystemBuffer, InputBufferLength)
                       : STATUS_SUCCESS;
             break;
         }
