@@ -16,10 +16,145 @@
 
 NTSTATUS
 NTAPI
+DispatchCreate(IN PSAC_DEVICE_EXTENSION DeviceExtension,
+               IN PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(DeviceExtension);
+
+    /* Channel creation happens via IOCTL_SAC_CHANNEL_CREATE once opened */
+    Irp->IoStatus.Information = 0;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+DispatchClose(IN PSAC_DEVICE_EXTENSION DeviceExtension,
+              IN PIRP Irp)
+{
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    UNREFERENCED_PARAMETER(DeviceExtension);
+
+    /* Tear down any channel(s) this handle owns */
+    ChanMgrCloseChannelsWithFileObject(IrpSp->FileObject);
+
+    Irp->IoStatus.Information = 0;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
 DispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject,
                       IN PIRP Irp)
 {
-    return STATUS_NOT_IMPLEMENTED;
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    PSAC_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    ULONG IoControlCode = IrpSp->Parameters.DeviceIoControl.IoControlCode;
+    ULONG InputBufferLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    PVOID SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    Irp->IoStatus.Information = 0;
+
+    /* This one completes later, from DoCmdCommand -- handle it separately */
+    if (IoControlCode == IOCTL_SAC_WAIT_CMD_REQUEST)
+    {
+        KeAcquireSpinLock(&DeviceExtension->Lock, &OldIrql);
+        if (DeviceExtension->PendingCmdIrp)
+        {
+            /* Only one helper can wait at a time */
+            KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
+            Irp->IoStatus.Status = STATUS_DEVICE_BUSY;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_DEVICE_BUSY;
+        }
+
+        IoMarkIrpPending(Irp);
+        DeviceExtension->PendingCmdIrp = Irp;
+        KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
+        return STATUS_PENDING;
+    }
+
+    switch (IoControlCode)
+    {
+        case IOCTL_SAC_CHANNEL_CREATE:
+        {
+            PSAC_IOCTL_CHANNEL_CREATE CreateRequest;
+            SAC_CHANNEL_ATTRIBUTES Attributes;
+            PSAC_CHANNEL Channel;
+
+            if ((InputBufferLength < sizeof(SAC_IOCTL_CHANNEL_CREATE)) ||
+                (IrpSp->FileObject->FsContext != NULL))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            CreateRequest = (PSAC_IOCTL_CHANNEL_CREATE)SystemBuffer;
+            CreateRequest->NameBuffer[SAC_IOCTL_NAME_SIZE] = UNICODE_NULL;
+            CreateRequest->DescriptionBuffer[SAC_IOCTL_DESCRIPTION_SIZE] = UNICODE_NULL;
+
+            RtlZeroMemory(&Attributes, sizeof(Attributes));
+            Attributes.ChannelType = Cmd;
+            RtlCopyMemory(Attributes.NameBuffer,
+                          CreateRequest->NameBuffer,
+                          sizeof(Attributes.NameBuffer));
+            RtlCopyMemory(Attributes.DescriptionBuffer,
+                          CreateRequest->DescriptionBuffer,
+                          sizeof(Attributes.DescriptionBuffer));
+
+            Status = ChanMgrCreateChannel(&Channel, &Attributes);
+            if (NT_SUCCESS(Status))
+            {
+                Channel->FileObject = IrpSp->FileObject;
+                IrpSp->FileObject->FsContext = Channel;
+            }
+            break;
+        }
+
+        case IOCTL_SAC_CHANNEL_READ:
+        {
+            PSAC_CHANNEL Channel = (PSAC_CHANNEL)IrpSp->FileObject->FsContext;
+            ULONG BytesRead = 0;
+
+            if (!Channel)
+            {
+                Status = STATUS_INVALID_HANDLE;
+                break;
+            }
+
+            Status = (OutputBufferLength > 0)
+                      ? Channel->ChannelInputRead(Channel, (PCHAR)SystemBuffer, OutputBufferLength, &BytesRead)
+                      : STATUS_SUCCESS;
+            Irp->IoStatus.Information = BytesRead;
+            break;
+        }
+
+        case IOCTL_SAC_CHANNEL_WRITE:
+        {
+            PSAC_CHANNEL Channel = (PSAC_CHANNEL)IrpSp->FileObject->FsContext;
+
+            if (!Channel)
+            {
+                Status = STATUS_INVALID_HANDLE;
+                break;
+            }
+
+            Status = (InputBufferLength > 0)
+                      ? Channel->ChannelOutputWrite(Channel, (PCHAR)SystemBuffer, InputBufferLength)
+                      : STATUS_SUCCESS;
+            break;
+        }
+
+        default:
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            break;
+    }
+
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 NTSTATUS
@@ -32,26 +167,31 @@ DispatchShutdownControl(IN PDEVICE_OBJECT DeviceObject,
 
 NTSTATUS
 NTAPI
-DispatchCreate(IN PSAC_DEVICE_EXTENSION DeviceExtension,
-               IN PIRP Irp)
-{
-    return STATUS_NOT_IMPLEMENTED;
-}
-
-NTSTATUS
-NTAPI
-DispatchClose(IN PSAC_DEVICE_EXTENSION DeviceExtension,
-              IN PIRP Irp)
-{
-    return STATUS_NOT_IMPLEMENTED;
-}
-
-NTSTATUS
-NTAPI
 Dispatch(IN PDEVICE_OBJECT DeviceObject,
          IN PIRP Irp)
 {
-    return STATUS_NOT_IMPLEMENTED;
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    PSAC_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    NTSTATUS Status;
+
+    switch (IrpSp->MajorFunction)
+    {
+        case IRP_MJ_CREATE:
+            Status = DispatchCreate(DeviceExtension, Irp);
+            break;
+
+        case IRP_MJ_CLOSE:
+            Status = DispatchClose(DeviceExtension, Irp);
+            break;
+
+        default:
+            Status = STATUS_NOT_IMPLEMENTED;
+            break;
+    }
+
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 BOOLEAN

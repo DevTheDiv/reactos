@@ -50,6 +50,7 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
             /* Setup the device extension */
             DeviceExtension = DeviceObject->DeviceExtension;
             DeviceExtension->Initialized = FALSE;
+            GlobalDeviceExtension = DeviceExtension;
 
             /* Initialize the driver object */
             RtlFillMemoryUlong(DriverObject->MajorFunction,

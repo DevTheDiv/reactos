@@ -178,8 +178,10 @@ ChanMgrGetChannelByName(IN PWCHAR Name,
             Status1 = ChannelGetName(CurrentChannel, &ChannelName);
             ASSERT(NT_SUCCESS(Status1));
 
-            /* Check if this is the name that was passed in */
-            Found = _wcsicmp(Name, ChannelName);
+            /* Check if this is the name that was passed in -- _wcsicmp
+               returns 0 on a match, so this must be compared, not used
+               as a boolean directly */
+            Found = (_wcsicmp(Name, ChannelName) == 0);
             SacFreePool(ChannelName);
             if (Found)
             {
@@ -523,7 +525,7 @@ ChanMgrGetNextActiveChannel(IN PSAC_CHANNEL CurrentChannel,
                             OUT PSAC_CHANNEL *TargetChannel)
 {
     NTSTATUS Status;
-    ULONG i;
+    ULONG i, Count;
     LONG ChannelIndex, StartIndex;
     PSAC_CHANNEL FoundChannel;
     BOOLEAN ChannelFound;
@@ -538,10 +540,15 @@ ChanMgrGetNextActiveChannel(IN PSAC_CHANNEL CurrentChannel,
     /* Assume failure */
     ChannelFound = FALSE;
 
-    /* Loop through all the possible active channels */
+    /* Loop through all the possible active channels. This must check
+       every slot exactly once starting at StartIndex and wrapping back
+       around -- a plain "for (i = StartIndex; i != StartIndex; ...)"
+       never runs its body at all since the condition is false from the
+       very first check. */
     StartIndex = (ChannelIndex + 1) % SAC_MAX_CHANNELS;
-    for (i = StartIndex; i != StartIndex; i = (i + 1) % SAC_MAX_CHANNELS)
+    for (Count = 0; Count < SAC_MAX_CHANNELS; Count++)
     {
+        i = (StartIndex + Count) % SAC_MAX_CHANNELS;
         /* Get the channel and see if it exists*/
         Status = ChanMgrGetByIndex(i, &FoundChannel);
         if (Status != STATUS_NOT_FOUND)

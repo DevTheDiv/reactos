@@ -423,9 +423,21 @@ ChannelInitializeVTable(IN PSAC_CHANNEL Channel)
             break;
 
         case Cmd:
-            /* FIXME: TODO */
-            ASSERT(FALSE);
-            return STATUS_NOT_IMPLEMENTED;
+            /* A Cmd channel is a plain byte passthrough just like Raw --
+               the only difference is who creates/drives it (a usermode
+               "cmd" helper instead of an in-driver consumer) */
+            Channel->ChannelCreate = RawChannelCreate;
+            Channel->ChannelDestroy = RawChannelDestroy;
+            Channel->ChannelOutputFlush = RawChannelOFlush;
+            Channel->ChannelOutputEcho = RawChannelOEcho;
+            Channel->ChannelOutputWrite = RawChannelOWrite;
+            Channel->ChannelOutputRead = RawChannelORead;
+            Channel->ChannelInputWrite = RawChannelIWrite;
+            Channel->ChannelInputRead = RawChannelIRead;
+            Channel->ChannelInputReadLast = RawChannelIReadLast;
+            Channel->ChannelInputBufferIsFull = RawChannelIBufferIsFull;
+            Channel->ChannelInputBufferLength = RawChannelIBufferLength;
+            break;
 
         case Raw:
 

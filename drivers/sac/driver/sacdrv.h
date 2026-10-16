@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <internal/hdl.h>
 #include <sacmsg.h>
+#include <drivers/sac/sacioctl.h>
 
 /* DEFINES ********************************************************************/
 
@@ -521,6 +522,7 @@ typedef struct _SAC_DEVICE_EXTENSION
     KTIMER Timer;
     KDPC Dpc;
     LIST_ENTRY List;
+    PIRP PendingCmdIrp;
 } SAC_DEVICE_EXTENSION, *PSAC_DEVICE_EXTENSION;
 
 //
@@ -786,6 +788,12 @@ NTSTATUS
 NTAPI
 ChanMgrCloseChannel(
     IN PSAC_CHANNEL Channel
+);
+
+NTSTATUS
+NTAPI
+ChanMgrCloseChannelsWithFileObject(
+    IN PFILE_OBJECT FileObject
 );
 
 //
@@ -1244,6 +1252,7 @@ extern PCHAR Utf8ConversionBuffer;
 extern BOOLEAN GlobalPagingNeeded, GlobalDoThreads;
 extern ULONG Utf8ConversionBufferSize;
 extern BOOLEAN CommandConsoleLaunchingEnabled;
+extern PSAC_DEVICE_EXTENSION GlobalDeviceExtension;
 
 //
 // Function to initialize a SAC Semaphore Lock

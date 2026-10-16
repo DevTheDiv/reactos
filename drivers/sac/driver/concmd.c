@@ -490,7 +490,34 @@ VOID
 NTAPI
 DoCmdCommand(IN PCHAR InputString)
 {
+    PSAC_DEVICE_EXTENSION DeviceExtension;
+    PIRP Irp;
+    KIRQL OldIrql;
+
     SAC_DBG(SAC_DBG_ENTRY_EXIT, "Entering\n");
+    UNREFERENCED_PARAMETER(InputString);
+
+    DeviceExtension = GlobalDeviceExtension;
+    if (!DeviceExtension) return;
+
+    /* Is a usermode cmd helper currently waiting for a request? */
+    KeAcquireSpinLock(&DeviceExtension->Lock, &OldIrql);
+    Irp = DeviceExtension->PendingCmdIrp;
+    DeviceExtension->PendingCmdIrp = NULL;
+    KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
+
+    if (Irp)
+    {
+        /* Wake it up -- it'll spawn cmd.exe and create its own channel */
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+    else
+    {
+        /* No helper is running to service this request */
+        SacPutSimpleMessage(148);
+    }
 }
 
 VOID

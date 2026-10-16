@@ -15,6 +15,7 @@
 ULONG SACDebug = 0;
 BOOLEAN CommandConsoleLaunchingEnabled;
 BOOLEAN GlobalDataInitialized;
+PSAC_DEVICE_EXTENSION GlobalDeviceExtension;
 KMUTEX SACCMDEventInfoMutex;
 BOOLEAN IoctlSubmitted;
 ULONG ProcessingType;
@@ -245,6 +246,7 @@ InitializeDeviceData(IN PDEVICE_OBJECT DeviceObject)
     DeviceExtension->PriorityBoost = IO_SERIAL_INCREMENT;
     DeviceExtension->PriorityFail = 0;
     DeviceExtension->RundownInProgress = 0;
+    DeviceExtension->PendingCmdIrp = NULL;
 
     /* Initialize locks, events, timers, DPCs, etc... */
     KeInitializeTimer(&DeviceExtension->Timer);

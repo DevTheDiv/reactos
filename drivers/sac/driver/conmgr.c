@@ -277,9 +277,19 @@ NTSTATUS
 NTAPI
 ConMgrDisplayFastChannelSwitchingInterface(IN PSAC_CHANNEL Channel)
 {
-    /* FIXME: TODO */
-    ASSERT(FALSE);
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    PWCHAR Name;
+    WCHAR Message[SAC_CHANNEL_NAME_SIZE + 32];
+
+    /* Just announce the switch -- no overlay/menu UI implemented */
+    Status = ChannelGetName(Channel, &Name);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    _swprintf(Message, L"\r\n[Switched to channel: %s]\r\n", Name);
+    SacFreePool(Name);
+
+    SacPutString(Message);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -420,12 +430,22 @@ ConMgrAdvanceCurrentChannel(VOID)
     Status = ChanMgrGetNextActiveChannel(CurrentChannel, &Index, &Channel);
     if (NT_SUCCESS(Status))
     {
-        /* Set it as the new channel */
-        Status = ConMgrSetCurrentChannel(Channel);
-        if (NT_SUCCESS(Status))
+        /* If there's nothing else active, the search wraps back around to
+           the current channel itself -- drop the extra reference it just
+           took and skip the switch rather than "switching" to ourselves */
+        if (Channel == CurrentChannel)
         {
-            /* Let the user switch to it */
-            Status = ConMgrDisplayFastChannelSwitchingInterface(Channel);
+            ChanMgrReleaseChannel(Channel);
+        }
+        else
+        {
+            /* Set it as the new channel */
+            Status = ConMgrSetCurrentChannel(Channel);
+            if (NT_SUCCESS(Status))
+            {
+                /* Let the user switch to it */
+                Status = ConMgrDisplayFastChannelSwitchingInterface(Channel);
+            }
         }
     }
 
