@@ -234,6 +234,18 @@ static void test_RtlRegisterWait(void)
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
 
+    /* Cancelling an idle wait must still signal the completion event. */
+    ResetEvent(event);
+    status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, INFINITE, WT_EXECUTEONLYONCE);
+    ok(!status, "RtlRegisterWait failed with status %lx\n", status);
+    if (!status)
+    {
+        status = RtlDeregisterWaitEx(wait1, event);
+        ok(status == STATUS_SUCCESS || status == STATUS_PENDING, "Unexpected status %lx\n", status);
+        result = WaitForSingleObject(event, 1000);
+        ok(result == WAIT_OBJECT_0, "Idle wait completion returned %lu\n", result);
+    }
+
     /* infinite timeout, signal the semaphore two times */
     info.userdata = 0;
     status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, INFINITE, WT_EXECUTEDEFAULT);
@@ -269,6 +281,22 @@ static void test_RtlRegisterWait(void)
     Sleep(50);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
+
+    /* A completed one-shot wait also has to signal a supplied event. */
+    ResetEvent(event);
+    status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, INFINITE, WT_EXECUTEONLYONCE);
+    ok(!status, "RtlRegisterWait failed with status %lx\n", status);
+    if (!status)
+    {
+        ReleaseSemaphore(semaphores[1], 1, NULL);
+        result = WaitForSingleObject(semaphores[0], 1000);
+        ok(result == WAIT_OBJECT_0, "Callback wait returned %lu\n", result);
+        Sleep(50);
+        status = RtlDeregisterWaitEx(wait1, event);
+        ok(status == STATUS_SUCCESS || status == STATUS_PENDING, "Unexpected status %lx\n", status);
+        result = WaitForSingleObject(event, 1000);
+        ok(result == WAIT_OBJECT_0, "Completed wait notification returned %lu\n", result);
+    }
 
     /* finite timeout, no event */
     info.userdata = 0;

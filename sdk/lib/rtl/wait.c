@@ -38,6 +38,26 @@ static inline PLARGE_INTEGER get_nt_timeout( PLARGE_INTEGER pTime, ULONG timeout
     return pTime;
 }
 
+/* The worker and deregistering thread each own one reference. Publish the
+ * completion handle before dropping the latter reference. Whichever thread
+ * finishes last signals it, including when a one-shot callback has already
+ * completed before deregistration begins. */
+static BOOLEAN
+RtlpReleaseWait(PRTLP_WAIT Wait)
+{
+    HANDLE CompletionEvent;
+
+    if (InterlockedIncrement(&Wait->DeleteCount) != 2)
+        return FALSE;
+
+    CompletionEvent = Wait->CompletionEvent;
+    NtClose(Wait->CancelEvent);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Wait);
+    if (CompletionEvent)
+        NtSetEvent(CompletionEvent, NULL);
+    return TRUE;
+}
+
 static VOID
 NTAPI
 Wait_thread_proc(LPVOID Arg)
@@ -47,7 +67,6 @@ Wait_thread_proc(LPVOID Arg)
     BOOLEAN alertable = (Wait->Flags & WT_EXECUTEINIOTHREAD) != 0;
     HANDLE handles[2] = { Wait->CancelEvent, Wait->Object };
     LARGE_INTEGER timeout;
-    HANDLE completion_event;
 
 //    TRACE("\n");
 
@@ -88,14 +107,7 @@ Wait_thread_proc(LPVOID Arg)
             break;
     }
 
-    completion_event = Wait->CompletionEvent;
-    if (completion_event) NtSetEvent( completion_event, NULL );
-
-    if (InterlockedIncrement( &Wait->DeleteCount ) == 2 )
-    {
-       NtClose( Wait->CancelEvent );
-       RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
-    }
+    RtlpReleaseWait(Wait);
 }
 
 
@@ -203,52 +215,34 @@ RtlDeregisterWaitEx(HANDLE WaitHandle,
                     HANDLE CompletionEvent)
 {
     PRTLP_WAIT Wait = (PRTLP_WAIT) WaitHandle;
-    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Synchronous = (CompletionEvent == INVALID_HANDLE_VALUE);
+    BOOLEAN CallbackPending;
+    NTSTATUS Status;
 
-    //TRACE( "(%p)\n", WaitHandle );
+    if (!Wait)
+        return STATUS_INVALID_HANDLE;
 
-    NtSetEvent( Wait->CancelEvent, NULL );
-    if (Wait->CallbackInProgress)
+    if (Synchronous)
     {
-        if (CompletionEvent != NULL)
-        {
-            if (CompletionEvent == INVALID_HANDLE_VALUE)
-            {
-                Status = NtCreateEvent( &CompletionEvent,
-                                         EVENT_ALL_ACCESS,
-                                         NULL,
-                                         NotificationEvent,
-                                         FALSE );
-
-                if (Status != STATUS_SUCCESS)
-                    return Status;
-
-                (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
-
-                if (Wait->CallbackInProgress)
-                    NtWaitForSingleObject( CompletionEvent, FALSE, NULL );
-
-                NtClose( CompletionEvent );
-            }
-            else
-            {
-                (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
-
-                if (Wait->CallbackInProgress)
-                    Status = STATUS_PENDING;
-            }
-        }
-        else
-            Status = STATUS_PENDING;
+        Status = NtCreateEvent(&CompletionEvent, EVENT_ALL_ACCESS, NULL,
+                               NotificationEvent, FALSE);
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
 
-    if (InterlockedIncrement( &Wait->DeleteCount ) == 2 )
-    {
+    InterlockedExchangePointer(&Wait->CompletionEvent, CompletionEvent);
+    NtSetEvent(Wait->CancelEvent, NULL);
+    CallbackPending = Wait->CallbackInProgress;
+    Status = RtlpReleaseWait(Wait) ? STATUS_SUCCESS : STATUS_PENDING;
+    if (!CompletionEvent && !CallbackPending)
         Status = STATUS_SUCCESS;
-        NtClose( Wait->CancelEvent );
-        RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
-    }
 
+    /* Wait must not be accessed after dropping our reference. */
+    if (Synchronous)
+    {
+        Status = NtWaitForSingleObject(CompletionEvent, FALSE, NULL);
+        NtClose(CompletionEvent);
+    }
     return Status;
 }
 
