@@ -197,38 +197,71 @@ ServiceMain(DWORD Argc, LPWSTR *Argv)
 
     ServiceStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 
-    SacDevice = CreateFileW(SAC_DEVICE_PATH,
-                            GENERIC_READ | GENERIC_WRITE,
-                            0,
-                            NULL,
-                            OPEN_EXISTING,
-                            0,
-                            NULL);
+    /*
+     * SAC driver might initialize asynchronously or have a slight startup delay.
+     * Retry connecting to \\.\SAC for up to 60 seconds, updating the SCM
+     * with SERVICE_START_PENDING.
+     */
+    {
+        DWORD CheckPoint = 1;
+        SacDevice = INVALID_HANDLE_VALUE;
+
+        while (WaitForSingleObject(ServiceStopEvent, 0) != WAIT_OBJECT_0)
+        {
+            ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
+            ServiceStatus.dwWaitHint = 3000;
+            ServiceStatus.dwCheckPoint = CheckPoint++;
+            SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
+
+            SacDevice = CreateFileW(SAC_DEVICE_PATH,
+                                    GENERIC_READ | GENERIC_WRITE,
+                                    0,
+                                    NULL,
+                                    OPEN_EXISTING,
+                                    0,
+                                    NULL);
+            if (SacDevice != INVALID_HANDLE_VALUE)
+            {
+                ZeroMemory(&CreateRequest, sizeof(CreateRequest));
+                lstrcpyW(CreateRequest.NameBuffer, L"Cmd0001");
+                lstrcpyW(CreateRequest.DescriptionBuffer, L"Command Prompt");
+
+                if (DeviceIoControl(SacDevice, IOCTL_SAC_CHANNEL_CREATE,
+                                    &CreateRequest, sizeof(CreateRequest),
+                                    NULL, 0, &BytesReturned, NULL))
+                {
+                    /* Successfully connected and created channel */
+                    break;
+                }
+
+                CloseHandle(SacDevice);
+                SacDevice = INVALID_HANDLE_VALUE;
+            }
+
+            if (CheckPoint > 60)
+            {
+                /* Timed out after 60 attempts (~60s) */
+                break;
+            }
+
+            Sleep(1000);
+        }
+    }
+
     if (SacDevice == INVALID_HANDLE_VALUE)
     {
         ServiceStatus.dwCurrentState = SERVICE_STOPPED;
         ServiceStatus.dwWin32ExitCode = GetLastError();
-        SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
-        return;
-    }
-
-    ZeroMemory(&CreateRequest, sizeof(CreateRequest));
-    lstrcpyW(CreateRequest.NameBuffer, L"Cmd0001");
-    lstrcpyW(CreateRequest.DescriptionBuffer, L"Command Prompt");
-
-    if (!DeviceIoControl(SacDevice, IOCTL_SAC_CHANNEL_CREATE,
-                         &CreateRequest, sizeof(CreateRequest),
-                         NULL, 0, &BytesReturned, NULL))
-    {
-        CloseHandle(SacDevice);
-        ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-        ServiceStatus.dwWin32ExitCode = GetLastError();
+        ServiceStatus.dwWaitHint = 0;
+        ServiceStatus.dwCheckPoint = 0;
         SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
         return;
     }
 
     ServiceStatus.dwCurrentState = SERVICE_RUNNING;
     ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+    ServiceStatus.dwWaitHint = 0;
+    ServiceStatus.dwCheckPoint = 0;
     SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
 
     while (WaitForSingleObject(ServiceStopEvent, 0) != WAIT_OBJECT_0)

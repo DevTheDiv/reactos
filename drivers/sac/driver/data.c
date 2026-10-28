@@ -13,7 +13,7 @@
 /* GLOBALS ********************************************************************/
 
 ULONG SACDebug = 0;
-BOOLEAN CommandConsoleLaunchingEnabled;
+BOOLEAN CommandConsoleLaunchingEnabled = TRUE;
 BOOLEAN GlobalDataInitialized;
 PSAC_DEVICE_EXTENSION GlobalDeviceExtension;
 KMUTEX SACCMDEventInfoMutex;
@@ -429,7 +429,7 @@ InitializeGlobalData(IN PUNICODE_STRING RegistryPath,
 
     /* Check if the administrator enabled this */
     Status = GetCommandConsoleLaunchingPermission(&CommandConsoleLaunchingEnabled);
-    if (!NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status))
     {
         /* Is it enabled? */
         if (CommandConsoleLaunchingEnabled)
@@ -441,7 +441,9 @@ InitializeGlobalData(IN PUNICODE_STRING RegistryPath,
                 SAC_DBG(SAC_DBG_INIT, "failed ImposeSacCmdServiceStartTypePolicy: %X\n", Status);
             }
         }
-
+    }
+    else
+    {
         /* We're going to keep going with the default */
         SAC_DBG(SAC_DBG_INIT, "failed GetCommandConsoleLaunchingPermission: %X\n", Status);
     }
