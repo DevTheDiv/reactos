@@ -497,8 +497,29 @@ ObpValidateAccessMask(IN PACCESS_STATE AccessState)
         if ((SecurityDescriptor->Control & SE_SACL_PRESENT) &&
             !(AccessState->PreviouslyGrantedAccess & ACCESS_SYSTEM_SECURITY))
         {
-            /* We're gonna need access */
-            AccessState->RemainingDesiredAccess |= ACCESS_SYSTEM_SECURITY;
+            PACL Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
+            BOOLEAN HasAuditAce = FALSE;
+
+            if (Sacl)
+            {
+                PACE_HEADER Ace = (PACE_HEADER)(Sacl + 1);
+                ULONG i;
+                for (i = 0; i < Sacl->AceCount; i++)
+                {
+                    if (Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                    {
+                        HasAuditAce = TRUE;
+                        break;
+                    }
+                    Ace = (PACE_HEADER)((ULONG_PTR)Ace + Ace->AceSize);
+                }
+            }
+
+            if (HasAuditAce)
+            {
+                /* We're gonna need access */
+                AccessState->RemainingDesiredAccess |= ACCESS_SYSTEM_SECURITY;
+            }
         }
     }
 

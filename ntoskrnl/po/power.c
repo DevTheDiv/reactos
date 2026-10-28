@@ -1030,10 +1030,47 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
             break;
         }
 
+        case SystemPowerInformation: /* 12 */
+        {
+            /* Chrome/base polls this for power monitoring; return sane defaults
+               instead of failing (which makes callers spin). */
+            typedef struct _ROSP_SYS_POWER_INFO
+            {
+                ULONG MaxIdlenessTime;
+                ULONG IdlenessTime;
+                ULONG Reduction;
+                LARGE_INTEGER TimeRemaining;
+                ULONG CoolingMode;
+            } ROS_SYS_POWER_INFO, *PROS_SYS_POWER_INFO;
+
+            if (OutputBufferLength < sizeof(ROS_SYS_POWER_INFO) || !OutputBuffer)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            _SEH2_TRY
+            {
+                PROS_SYS_POWER_INFO Info = (PROS_SYS_POWER_INFO)OutputBuffer;
+                Info->MaxIdlenessTime = 0;
+                Info->IdlenessTime = 0;
+                Info->Reduction = 0;
+                Info->TimeRemaining.QuadPart = 0;
+                Info->CoolingMode = 0; /* PO_TZ_ACTIVE */
+                Status = STATUS_SUCCESS;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            break;
+        }
+
         default:
             Status = STATUS_NOT_IMPLEMENTED;
-            DPRINT1("PowerInformationLevel 0x%x is UNIMPLEMENTED! Have a nice day.\n",
-                    PowerInformationLevel);
+            DPRINT("PowerInformationLevel 0x%x is UNIMPLEMENTED!\n",
+                   PowerInformationLevel);
             break;
     }
 

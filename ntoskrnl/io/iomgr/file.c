@@ -4147,6 +4147,148 @@ NtCancelIoFile(IN HANDLE FileHandle,
  */
 NTSTATUS
 NTAPI
+NtCancelIoFileEx(IN HANDLE FileHandle,
+                 IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                 OUT PIO_STATUS_BLOCK IoStatusBlock)
+{
+    PFILE_OBJECT FileObject;
+    PETHREAD Thread;
+    PIRP Irp;
+    KIRQL OldIrql;
+    BOOLEAN OurIrpsInList = FALSE;
+    BOOLEAN FoundMatch = FALSE;
+    LARGE_INTEGER Interval;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    NTSTATUS Status;
+    PLIST_ENTRY ListHead, NextEntry;
+    PAGED_CODE();
+    IOTRACE(IO_API_DEBUG, "FileHandle: %p\n", FileHandle);
+
+    /* Check the previous mode */
+    if (PreviousMode != KernelMode)
+    {
+        /* Enter SEH for probing */
+        _SEH2_TRY
+        {
+            /* Probe the I/O Status Block */
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* Return the exception code */
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    /* Reference the file object */
+    Status = ObReferenceObjectByHandle(FileHandle,
+                                       0,
+                                       IoFileObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&FileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* IRP cancellations are synchronized at APC_LEVEL. */
+    KeRaiseIrql(APC_LEVEL, &OldIrql);
+
+    /* Get the current thread */
+    Thread = PsGetCurrentThread();
+
+    /* Update the operation counts */
+    IopUpdateOperationCount(IopOtherTransfer);
+
+    /* Loop the list */
+    ListHead = &Thread->IrpList;
+    NextEntry = ListHead->Flink;
+    while (ListHead != NextEntry)
+    {
+        /* Get the IRP and check if the File Object matches */
+        Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
+        if (Irp->Tail.Overlay.OriginalFileObject == FileObject)
+        {
+            /* If a specific request was given, only cancel that one */
+            if (!IoRequestToCancel || Irp->UserIosb == IoRequestToCancel)
+            {
+                /* Cancel this IRP and keep looping */
+                IoCancelIrp(Irp);
+                OurIrpsInList = TRUE;
+                FoundMatch = TRUE;
+            }
+        }
+
+        /* Go to the next entry */
+        NextEntry = NextEntry->Flink;
+    }
+
+    /* Lower the IRQL */
+    KeLowerIrql(OldIrql);
+
+    /* Check if we had found an IRP */
+    if (OurIrpsInList)
+    {
+        /* Setup a 10ms wait */
+        Interval.QuadPart = -100000;
+
+        /* Start looping */
+        while (OurIrpsInList)
+        {
+            /* Do the wait */
+            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+            OurIrpsInList = FALSE;
+
+            /* Raise IRQL */
+            KeRaiseIrql(APC_LEVEL, &OldIrql);
+
+            /* Now loop the list again */
+            NextEntry = ListHead->Flink;
+            while (NextEntry != ListHead)
+            {
+                /* Get the IRP and check if the File Object matches */
+                Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
+                if (Irp->Tail.Overlay.OriginalFileObject == FileObject)
+                {
+                    /* Keep looping */
+                    OurIrpsInList = TRUE;
+                    break;
+                }
+
+                /* Go to the next entry */
+                NextEntry = NextEntry->Flink;
+            }
+
+            /* Lower the IRQL */
+            KeLowerIrql(OldIrql);
+        }
+    }
+
+    /* A specific request that was never found counts as failure */
+    Status = FoundMatch ? STATUS_SUCCESS : STATUS_NOT_FOUND;
+
+    /* Enter SEH for writing back the I/O Status */
+    _SEH2_TRY
+    {
+        /* Write the result */
+        IoStatusBlock->Status = Status;
+        IoStatusBlock->Information = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        /* Ignore exception */
+    }
+    _SEH2_END;
+
+    /* Dereference the file object and return the result */
+    ObDereferenceObject(FileObject);
+    return Status;
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
 NtDeleteFile(IN POBJECT_ATTRIBUTES ObjectAttributes)
 {
     NTSTATUS Status;

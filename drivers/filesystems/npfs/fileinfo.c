@@ -217,37 +217,45 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
                 IN OUT PULONG Length)
 {
     PFILE_NAME_INFORMATION InfoBuffer = Buffer;
-    USHORT NameLength;
+    USHORT FullNameLength;
     NTSTATUS Status;
     PWCHAR Name;
+    ULONG HeaderSize = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    USHORT CopyLength;
 
-    *Length -= sizeof(*InfoBuffer);
+    if (*Length < HeaderSize)
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    *Length -= HeaderSize;
 
     if (Ccb->NodeType == NPFS_NTC_ROOT_DCB_CCB)
     {
-        NameLength = NpVcb->RootDcb->FullName.Length;
+        FullNameLength = NpVcb->RootDcb->FullName.Length;
         Name = NpVcb->RootDcb->FullName.Buffer;
     }
     else
     {
-        NameLength = Ccb->Fcb->FullName.Length;
+        FullNameLength = Ccb->Fcb->FullName.Length;
         Name = Ccb->Fcb->FullName.Buffer;
     }
 
-    if (*Length < NameLength)
+    CopyLength = FullNameLength;
+    if (*Length < FullNameLength)
     {
         Status = STATUS_BUFFER_OVERFLOW;
-        NameLength = (USHORT)*Length;
+        CopyLength = (USHORT)*Length;
     }
     else
     {
         Status = STATUS_SUCCESS;
     }
 
-    RtlCopyMemory(InfoBuffer->FileName, Name, NameLength);
-    InfoBuffer->FileNameLength = NameLength;
+    RtlCopyMemory(InfoBuffer->FileName, Name, CopyLength);
+    InfoBuffer->FileNameLength = FullNameLength;
 
-    *Length -= NameLength;
+    *Length -= CopyLength;
     return Status;
 }
 

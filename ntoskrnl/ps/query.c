@@ -455,11 +455,20 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
-                                               PROCESS_QUERY_INFORMATION,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
                                                NULL);
+            if (!NT_SUCCESS(Status))
+            {
+                Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                   PROCESS_QUERY_INFORMATION,
+                                                   PsProcessType,
+                                                   PreviousMode,
+                                                   (PVOID*)&Process,
+                                                   NULL);
+            }
             if (!NT_SUCCESS(Status)) break;
 
             /* Protect writes with SEH */
@@ -480,6 +489,53 @@ NtQueryInformationProcess(
             _SEH2_END;
 
             /* Dereference the process */
+            ObDereferenceObject(Process);
+            break;
+        }
+
+        /* Process Cycle Time */
+        case ProcessCycleTime:
+        {
+            PPROCESS_CYCLE_TIME_INFORMATION CycleInfo = (PPROCESS_CYCLE_TIME_INFORMATION)ProcessInformation;
+            ULONG UserTime, KernelTime;
+
+            if (ProcessInformationLength != sizeof(PROCESS_CYCLE_TIME_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Length = sizeof(PROCESS_CYCLE_TIME_INFORMATION);
+
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&Process,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+            {
+                Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                   PROCESS_QUERY_INFORMATION,
+                                                   PsProcessType,
+                                                   PreviousMode,
+                                                   (PVOID*)&Process,
+                                                   NULL);
+            }
+            if (!NT_SUCCESS(Status)) break;
+
+            _SEH2_TRY
+            {
+                KernelTime = KeQueryRuntimeProcess(&Process->Pcb, &UserTime);
+                CycleInfo->AccumulatedCycles = ((ULONGLONG)(UserTime + KernelTime)) * 1000000ULL;
+                CycleInfo->CurrentCycleCount = CycleInfo->AccumulatedCycles;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
             ObDereferenceObject(Process);
             break;
         }
@@ -2995,6 +3051,10 @@ NtSetInformationThread(
             ObDereferenceObject(Thread);
             break;
         }
+        case ThreadPowerThrottlingState:
+        case ThreadPagePriority:
+            Status = STATUS_SUCCESS;
+            break;
 #endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS1) || defined(__REACTOS__) */
 
         /* Anything else */
@@ -3569,6 +3629,43 @@ NtQueryInformationThread(
 
             /* Dereference the thread */
             ObDereferenceObject(Thread);
+            break;
+        }
+        case ThreadPowerThrottlingState:
+        {
+            _SEH2_TRY
+            {
+                RtlZeroMemory(ThreadInformation, sizeof(ULONG) * 3);
+                ((PULONG)ThreadInformation)[0] = 1;
+                Length = sizeof(ULONG) * 3;
+                Status = STATUS_SUCCESS;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            break;
+        }
+
+        case ThreadPagePriority:
+        {
+            Length = sizeof(ULONG);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+            _SEH2_TRY
+            {
+                *(PULONG)ThreadInformation = 5; /* MEMORY_PRIORITY_NORMAL */
+                Status = STATUS_SUCCESS;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
             break;
         }
 #endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS1) || defined(__REACTOS__) */

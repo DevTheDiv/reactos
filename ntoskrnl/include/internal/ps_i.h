@@ -9,6 +9,15 @@
 
 #include "icif.h"
 
+#ifndef _PROCESS_CYCLE_TIME_INFORMATION_DEFINED
+#define _PROCESS_CYCLE_TIME_INFORMATION_DEFINED
+typedef struct _PROCESS_CYCLE_TIME_INFORMATION
+{
+    ULONGLONG AccumulatedCycles;
+    ULONGLONG CurrentCycleCount;
+} PROCESS_CYCLE_TIME_INFORMATION, *PPROCESS_CYCLE_TIME_INFORMATION;
+#endif
+
 //
 // Process Information Classes
 //
@@ -324,7 +333,12 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     ),
 
     /* ProcessCycleTime */
-    IQS_NONE,
+    IQS_SAME
+    (
+        PROCESS_CYCLE_TIME_INFORMATION,
+        ULONG,
+        ICIF_QUERY
+    ),
 
     /* ProcessPagePriority */
     IQS_NONE,
@@ -552,7 +566,12 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     IQS_NONE,
 
     /* ThreadPagePriority */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ThreadActualBasePriority */
     IQS_NONE,
@@ -624,7 +643,12 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     /* ThreadManageWritesToExecutableMemory */
     IQS_NONE,
     /* ThreadPowerThrottlingState */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG[3],
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
     /* ThreadWorkloadClass */
     IQS_NONE,
     /* ThreadCreateStateChange */
