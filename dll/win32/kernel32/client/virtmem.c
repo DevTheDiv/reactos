@@ -15,6 +15,23 @@
 
 /* FUNCTIONS ******************************************************************/
 
+static DWORD
+BasepNormalizeCfgProtection(DWORD Protection)
+{
+    /*
+     * CFG is not enabled on ReactOS. Accept its executable-page metadata
+     * modifier without passing it to the NT5 memory manager. Keep ordinary
+     * protection validation, including rejection on non-executable pages.
+     * This does not implement CFG or mark any indirect call targets invalid.
+     */
+    if (Protection & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                      PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
+    {
+        Protection &= ~PAGE_TARGETS_INVALID;
+    }
+    return Protection;
+}
+
 /*
  * @implemented
  */
@@ -43,7 +60,7 @@ VirtualAllocEx(IN HANDLE hProcess,
                                      0,
                                      &dwSize,
                                      flAllocationType,
-                                     flProtect);
+                                     BasepNormalizeCfgProtection(flProtect));
 
     /* Check for status */
     if (!NT_SUCCESS(Status))
@@ -162,7 +179,7 @@ VirtualProtectEx(IN HANDLE hProcess,
     Status = NtProtectVirtualMemory(hProcess,
                                     &lpAddress,
                                     &dwSize,
-                                    flNewProtect,
+                                    BasepNormalizeCfgProtection(flNewProtect),
                                     (PULONG)lpflOldProtect);
     if (!NT_SUCCESS(Status))
     {

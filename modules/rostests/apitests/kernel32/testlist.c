@@ -45,10 +45,12 @@ extern void func_SystemFirmware(void);
 extern void func_TerminateProcess(void);
 extern void func_TunnelCache(void);
 extern void func_UEFIFirmware(void);
+extern void func_VirtualMemory(void);
 extern void func_WideCharToMultiByte(void);
 
 const struct test winetest_testlist[] =
 {
+    { "VirtualMemory",               func_VirtualMemory },
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
