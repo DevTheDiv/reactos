@@ -936,17 +936,22 @@ ExpQuerySystemProcessInformation(
         {
             SpiCurrent = (PSYSTEM_PROCESS_INFORMATION) Current;
 
+            /* Routine enumeration tracing is opt-in; serial output is costly. */
+            DPRINT("[PROCWALK] %p (%.15s) pid=%p entering\n",
+                    Process, Process->ImageFileName, Process->UniqueProcessId);
+
             /* Lock the Process */
             KeEnterCriticalRegion();
             ExAcquirePushLockShared(&Process->ProcessLock);
+            DPRINT("[PROCWALK] %p locked\n", Process);
 
             if ((Process->ProcessExiting) &&
                 (Process->Pcb.Header.SignalState) &&
                 !(Process->ActiveThreads) &&
                 (IsListEmpty(&Process->Pcb.ThreadListHead)))
             {
-                DPRINT1("Process %p (%s:%p) is a zombie\n",
-                        Process, Process->ImageFileName, Process->UniqueProcessId);
+                DPRINT("Process %p (%s:%p) is a zombie\n",
+                       Process, Process->ImageFileName, Process->UniqueProcessId);
                 CurrentSize = 0;
                 ImageNameMaximumLength = 0;
 
@@ -958,11 +963,32 @@ ExpQuerySystemProcessInformation(
 
             ThreadsCount = 0;
             CurrentEntry = Process->Pcb.ThreadListHead.Flink;
-            while (CurrentEntry != &Process->Pcb.ThreadListHead)
             {
-                CurrentThread = CONTAINING_RECORD(CurrentEntry, ETHREAD, Tcb.ThreadListEntry);
-                ThreadsCount++;
-                CurrentEntry = CurrentEntry->Flink;
+                /* TEMP DIAGNOSTIC: bounded walk - detects a cyclic/corrupted thread list */
+                ULONG WalkCount = 0;
+                PETHREAD PrevThread = NULL;
+                while (CurrentEntry != &Process->Pcb.ThreadListHead)
+                {
+                    CurrentThread = CONTAINING_RECORD(CurrentEntry, ETHREAD, Tcb.ThreadListEntry);
+                    if (WalkCount > 10000)
+                    {
+                        DPRINT1("[PROCWALK] THREAD LIST LOOP DETECTED in %p (%.15s) pid=%p "
+                                "after %lu iterations! CurrentThread=%p StartFlink=%p "
+                                "HeadBlink=%p\n",
+                                Process, Process->ImageFileName, Process->UniqueProcessId,
+                                WalkCount, CurrentThread,
+                                Process->Pcb.ThreadListHead.Flink,
+                                Process->Pcb.ThreadListHead.Blink);
+                        break;
+                    }
+                    if ((WalkCount < 5) && PrevThread)
+                        DPRINT("[PROCWALK]   thread %lu: %p\n", WalkCount, CurrentThread);
+                    PrevThread = CurrentThread;
+                    WalkCount++;
+                    CurrentEntry = CurrentEntry->Flink;
+                }
+                ThreadsCount = WalkCount <= 10000 ? WalkCount : ThreadsCount;
+                if (WalkCount > 10000) ThreadsCount = 0;
             }
 
             // size of the structure for every process

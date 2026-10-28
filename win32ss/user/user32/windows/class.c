@@ -1368,6 +1368,19 @@ RegisterClassExWOWW(WNDCLASSEXW *lpwcx,
            Atom, lpwcx->lpfnWndProc, lpwcx->hInstance, lpwcx->hbrBackground,
            lpwcx->style, lpwcx->cbClsExtra, lpwcx->cbWndExtra, WndClass);
 
+    if (Atom) {
+        if (IS_ATOM(lpwcx->lpszClassName)) {
+            DbgPrint("[USER32_CLASS] PID %lu RegisterClassEx -> Atom 0x%x (atom=0x%p)\n",
+                     GetCurrentProcessId(), Atom, lpwcx->lpszClassName);
+        } else {
+            DbgPrint("[USER32_CLASS] PID %lu RegisterClassEx -> Atom 0x%x (name='%S')\n",
+                     GetCurrentProcessId(), Atom, lpwcx->lpszClassName ? lpwcx->lpszClassName : L"(null)");
+        }
+    } else {
+        DbgPrint("[USER32_CLASS] PID %lu RegisterClassEx FAILED (name='%S', err=%lu)\n",
+                 GetCurrentProcessId(), IS_ATOM(lpwcx->lpszClassName) ? L"(atom)" : (lpwcx->lpszClassName ? lpwcx->lpszClassName : L"(null)"), GetLastError());
+    }
+
     return Atom;
 }
 

@@ -1010,6 +1010,33 @@ DispatchToUser:
                    ExceptionRecord->ExceptionInformation[1]);
         }
 
+        /* TEMP DIAGNOSTIC: walk the faulting thread's user stack before
+           forwarding the second-chance exception to the debug port */
+        _SEH2_TRY
+        {
+            ULONG_PTR Ebp = TrapFrame->Ebp;
+            ULONG i;
+            DPRINT1("[USER-EXC] 2nd chance in %.16s (PID %lu TID %lu) EIP=%p P1=%p\n",
+                    PsGetCurrentProcess()->ImageFileName,
+                    (ULONG)(ULONG_PTR)PsGetCurrentProcessId(),
+                    (ULONG)(ULONG_PTR)PsGetCurrentThreadId(),
+                    (PVOID)TrapFrame->Eip,
+                    (PVOID)ExceptionRecord->ExceptionInformation[1]);
+            for (i = 0; i < 14 && Ebp; i++)
+            {
+                ULONG_PTR RetAddr = *(PULONG_PTR)(Ebp + sizeof(ULONG_PTR));
+                ULONG_PTR NextEbp = *(PULONG_PTR)Ebp;
+                DPRINT1("[USER-EXC]   frame %lu: ret=%p\n", i, (PVOID)RetAddr);
+                if (NextEbp <= Ebp) break;
+                Ebp = NextEbp;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            DPRINT1("[USER-EXC] stack walk faulted\n");
+        }
+        _SEH2_END;
+
         /* Try second chance */
         if (DbgkForwardException(ExceptionRecord, TRUE, TRUE))
         {

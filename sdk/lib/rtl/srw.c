@@ -233,6 +233,7 @@ RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
                                 IN PRTLP_SRWLOCK_WAITBLOCK WaitBlock)
 {
     LONG_PTR CurrentValue;
+    ULONG SpinCount = 0;
 
     while (1)
     {
@@ -257,6 +258,14 @@ RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
             }
         }
 
+        if (++SpinCount > 100000000)
+        {
+            SpinCount = 0;
+            DPRINT1("SRWLOCK %p: exclusive waiter spin-stuck, waitblock=%p "
+                    "wake=%lld ptr=%p\n",
+                    SRWLock, WaitBlock, (LONGLONG)WaitBlock->Wake,
+                    (PVOID)SRWLock->Ptr);
+        }
         YieldProcessor();
     }
 }

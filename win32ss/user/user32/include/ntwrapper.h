@@ -439,6 +439,7 @@ SetWindowPos(HWND hWnd, HWND hWndAfter, int X, int Y, int cx, int cy, UINT uFlag
 EXTINLINE BOOL WINAPI
 ShowWindow(HWND hWnd, int nCmdShow)
 {
+    DbgPrint("[USER32_WIN] PID %lu ShowWindow(hWnd=%p, nCmdShow=%d)\n", GetCurrentProcessId(), hWnd, nCmdShow);
     return NtUserShowWindow(hWnd, nCmdShow);
 }
 

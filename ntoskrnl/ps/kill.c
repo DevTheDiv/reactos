@@ -1227,6 +1227,19 @@ NtTerminateProcess(IN HANDLE ProcessHandle OPTIONAL,
                                        NULL);
     if (!NT_SUCCESS(Status)) return(Status);
 
+    /* TEMP DIAGNOSTIC: log every process termination with the caller's user-mode EIP */
+    {
+        PKTRAP_FRAME TrapFrame = KeGetCurrentThread()->TrapFrame;
+        ULONG_PTR CallerEip = (TrapFrame && TrapFrame->Eip) ? TrapFrame->Eip : 0;
+        DPRINT1("[TERMINATE] Caller PID %lu terminates '%s' (PID %lu) ExitStatus=0x%08lx CallerEIP=%p Mode=%s\n",
+                (ULONG)(ULONG_PTR)PsGetCurrentProcessId(),
+                Process->ImageFileName,
+                (ULONG)Process->UniqueProcessId,
+                ExitStatus,
+                (PVOID)CallerEip,
+                KeGetPreviousMode() == UserMode ? "User" : "Kernel");
+    }
+
     /* Check if this is a Critical Process, and Bugcheck */
     if (Process->BreakOnTermination)
     {

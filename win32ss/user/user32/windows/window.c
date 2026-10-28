@@ -326,9 +326,23 @@ User32CreateWindowEx(DWORD dwExStyle,
         break;
     }
 
-#if 0
-    DbgPrint("[window] NtUserCreateWindowEx() == %d\n", Handle);
-#endif
+    if (Handle) {
+        if (IS_ATOM(lpClassName)) {
+            DbgPrint("[USER32_WIN] PID %lu CreateWindowEx -> %p (atom=0x%x, title='%wZ', style=0x%08x ex=0x%08x x=%d y=%d w=%d h=%d)\n",
+                     GetCurrentProcessId(), Handle, (ULONG_PTR)lpClassName, (PUNICODE_STRING)&WindowName, dwStyle, dwExStyle, x, y, nWidth, nHeight);
+        } else {
+            DbgPrint("[USER32_WIN] PID %lu CreateWindowEx -> %p (class='%wZ', title='%wZ', style=0x%08x ex=0x%08x x=%d y=%d w=%d h=%d)\n",
+                     GetCurrentProcessId(), Handle, &ClassName, (PUNICODE_STRING)&WindowName, dwStyle, dwExStyle, x, y, nWidth, nHeight);
+        }
+    } else {
+        if (IS_ATOM(lpClassName)) {
+            DbgPrint("[USER32_WIN] PID %lu CreateWindowEx FAILED err=%lu (atom=0x%x, title='%wZ')\n",
+                     GetCurrentProcessId(), GetLastError(), (ULONG_PTR)lpClassName, (PUNICODE_STRING)&WindowName);
+        } else {
+            DbgPrint("[USER32_WIN] PID %lu CreateWindowEx FAILED err=%lu (class='%wZ', title='%wZ')\n",
+                     GetCurrentProcessId(), GetLastError(), &ClassName, (PUNICODE_STRING)&WindowName);
+        }
+    }
 
 cleanup:
     if (!Unicode)

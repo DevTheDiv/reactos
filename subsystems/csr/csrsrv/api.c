@@ -472,6 +472,18 @@ CsrApiRequestThread(
             /* If this was an exception, handle it */
             if (MessageType == LPC_EXCEPTION)
             {
+                /* TEMP DIAGNOSTIC: dump the user-mode exception that reached CSRSS */
+                PDBGKM_MSG DbgKmMsg = (PDBGKM_MSG)&ReceiveMsg;
+                DPRINT1("[CSR-EXCEPTION] PID %lu TID %lu raised exception 0x%08lx at %p (params: %p %p %p %p)\n",
+                        (ULONG)ReceiveMsg.Header.ClientId.UniqueProcess,
+                        (ULONG)ReceiveMsg.Header.ClientId.UniqueThread,
+                        DbgKmMsg->Exception.ExceptionRecord.ExceptionCode,
+                        DbgKmMsg->Exception.ExceptionRecord.ExceptionAddress,
+                        DbgKmMsg->Exception.ExceptionRecord.ExceptionInformation[0],
+                        DbgKmMsg->Exception.ExceptionRecord.ExceptionInformation[1],
+                        DbgKmMsg->Exception.ExceptionRecord.ExceptionInformation[2],
+                        DbgKmMsg->Exception.ExceptionRecord.ExceptionInformation[3]);
+
                 ReplyMsg = &ReceiveMsg;
                 ReplyPort = CsrApiPort;
                 ReplyMsg->Status = DBG_CONTINUE;
@@ -665,6 +677,18 @@ CsrApiRequestThread(
             /* Check if this was an exception */
             if (MessageType == LPC_EXCEPTION)
             {
+                /* TEMP DIAGNOSTIC: dump the user-mode exception that reached CSRSS */
+                PDBGKM_MSG DbgKmMsg2 = (PDBGKM_MSG)&ReceiveMsg;
+                DPRINT1("[CSR-EXCEPTION] PID %lu TID %lu raised exception 0x%08lx at %p FirstChance=%lu (params: %p %p %p)\n",
+                        (ULONG)ReceiveMsg.Header.ClientId.UniqueProcess,
+                        (ULONG)ReceiveMsg.Header.ClientId.UniqueThread,
+                        DbgKmMsg2->Exception.ExceptionRecord.ExceptionCode,
+                        DbgKmMsg2->Exception.ExceptionRecord.ExceptionAddress,
+                        DbgKmMsg2->Exception.FirstChance,
+                        DbgKmMsg2->Exception.ExceptionRecord.ExceptionInformation[0],
+                        DbgKmMsg2->Exception.ExceptionRecord.ExceptionInformation[1],
+                        DbgKmMsg2->Exception.ExceptionRecord.ExceptionInformation[2]);
+
                 /* Kill the process */
                 NtTerminateProcess(CsrProcess->ProcessHandle, STATUS_ABANDONED);
 
