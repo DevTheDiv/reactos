@@ -1,0 +1,23 @@
+{
+  "measured_at_utc": "2026-10-28T22:01:43.659044+00:00",
+  "source_base": "dba8148521d",
+  "host": "Windows",
+  "qemu_version": "QEMU emulator version 11.1.0 (v11.1.0-12130-ge470268ff4)",
+  "vulkan_loader_api": "1.4.341",
+  "enumerated_device_descriptions": [
+    "AMD Radeon(TM) Graphics (Vulkan 1.4.315)",
+    "NVIDIA GeForce GTX 1080 (Vulkan 1.4.312)",
+    "NVIDIA GeForce RTX 4080 (Vulkan 1.4.312)"
+  ],
+  "control_2d": "passed",
+  "venus_device_initialization": "passed",
+  "pci_device": "1af4:1050",
+  "smoke_accelerator": "tcg",
+  "guest_cpu_executed": false,
+  "guest_venus_context_created": false,
+  "guest_vulkan_validated": false,
+  "host_external_memory_fd_advertised": false,
+  "host_external_memory_win32_advertised": true,
+  "raw_report": "C:/ReactOS/vm/graphics-host-report.json",
+  "next_gate": "Create a guest Venus context and render/read back a verified off-screen image; initialization alone does not establish rendering support."
+}
