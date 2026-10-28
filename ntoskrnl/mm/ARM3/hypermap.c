@@ -150,9 +150,11 @@ MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
     PointerPte += (Offset + 1);
     TempPte = ValidKernelPte;
 
-    /* Disable cache. Write through */
-    MI_PAGE_DISABLE_CACHE(&TempPte);
-    MI_PAGE_WRITE_THROUGH(&TempPte);
+    /*
+     * Keep the normal RAM cache attributes from ValidKernelPte. These pages
+     * are ordinary physical memory, not device memory. Uncached zeroing makes
+     * the background zero-page thread monopolize a CPU under WHPX.
+     */
 
     /* Make sure the list isn't empty and loop it */
     ASSERT(Pfn1 != (PVOID)LIST_HEAD);
