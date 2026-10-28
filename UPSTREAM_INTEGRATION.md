@@ -1,9 +1,12 @@
-# Official upstream integration candidate
+# Official upstream integration
 
-This candidate merges official master `e46f4bb1a1ea7c722f941231565144fe0c286d3e`
+This integration merges official master `e46f4bb1a1ea7c722f941231565144fe0c286d3e`
 (2026-10-25) into the Chrome/Node work at `73cfea8381b`. It was prepared in a
-detached worktree, without adding a branch. **Do not promote it to `node-support`
-yet:** the application tests below exposed unresolved failures.
+detached worktree, without adding a branch, and is being integrated into the
+existing `node-support` development branch at the user's request. The full build
+passed, but the application tests below exposed unresolved failures. Catching up
+the development branch does not establish Chrome stability or release readiness.
+The previous branch tip, `73cfea8381b`, remains the merge's first parent.
 
 ## Resolutions and follow-up fixes
 
@@ -52,7 +55,7 @@ working Chrome disk and default launcher were left untouched.
   Search text was accepted and submitted; Google redirected to its verification
   page. This is not evidence of rendered search results or general web support.
 
-## Promotion blockers
+## Known runtime issues and validation gaps
 
 - A later browser breakpoint occurred during the first run. The online search
   run subsequently displayed `STATUS_INTEGER_DIVIDE_BY_ZERO` in a renderer.
