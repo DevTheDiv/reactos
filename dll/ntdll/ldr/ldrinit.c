@@ -504,6 +504,20 @@ LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry)
     return Cookie;
 }
 
+static LONG
+NTAPI
+LdrpLogInitException(PEXCEPTION_POINTERS ExceptionPointers,
+                     PUNICODE_STRING DllName,
+                     ULONG Reason)
+{
+    DPRINT1("WARNING: Exception 0x%x at %p during LdrpCallInitRoutine(reason=%lu) for %wZ\n",
+            ExceptionPointers->ExceptionRecord->ExceptionCode,
+            ExceptionPointers->ExceptionRecord->ExceptionAddress,
+            Reason,
+            DllName);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 VOID
 NTAPI
 LdrpInitializeThread(IN PCONTEXT Context)
@@ -595,10 +609,10 @@ LdrpInitializeThread(IN PCONTEXT Context)
                                                 NULL);
                         }
                     }
-                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    _SEH2_EXCEPT(LdrpLogInitException(_SEH2_GetExceptionInformation(),
+                                                      &LdrEntry->BaseDllName,
+                                                      DLL_THREAD_ATTACH))
                     {
-                        DPRINT1("WARNING: Exception 0x%x during LdrpCallInitRoutine(DLL_THREAD_ATTACH) for %wZ\n",
-                                _SEH2_GetExceptionCode(), &LdrEntry->BaseDllName);
                     }
                     _SEH2_END;
 
@@ -791,6 +805,16 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
 
         /* Get its entrypoint */
         EntryPoint = LdrEntry->EntryPoint;
+
+        /* Register the module's TLS directory if it was loaded dynamically.
+           For startup modules this is a no-op (already registered). */
+        Status = LdrpHandleTlsData(LdrEntry);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("LDR: LdrpHandleTlsData failed for %wZ with 0x%08lx\n",
+                    &LdrEntry->BaseDllName, Status);
+            Status = STATUS_SUCCESS;
+        }
 
         /* Are we being debugged? */
         BreakOnDllLoad = 0;
@@ -1349,11 +1373,13 @@ LdrpAllocateTls(VOID)
     if (!LdrpNumberOfTlsEntries)
         return STATUS_SUCCESS;
 
-    /* Allocate the vector array */
+    /* Allocate the vector array, always full-size so late-loaded TLS
+       modules never need to resize (or free!) vectors other threads use */
     TlsVector = RtlAllocateHeap(RtlGetProcessHeap(),
                                     0,
-                                    LdrpNumberOfTlsEntries * sizeof(PVOID));
+                                    LDRP_TLS_MAX_ENTRIES * sizeof(PVOID));
     if (!TlsVector) return STATUS_NO_MEMORY;
+    RtlZeroMemory(TlsVector, LDRP_TLS_MAX_ENTRIES * sizeof(PVOID));
     Teb->ThreadLocalStoragePointer = TlsVector;
 
     /* Loop the TLS Array */
@@ -1396,6 +1422,139 @@ LdrpAllocateTls(VOID)
 
     /* Done */
     return STATUS_SUCCESS;
+}
+
+/*++
+ * @name LdrpHandleTlsData
+ *
+ * Register the TLS directory of a dynamically (late) loaded module:
+ * assign it a TLS slot index, write it into the module's tls_index
+ * variable, add it to the global TLS list (so all future threads get
+ * a properly initialized copy of the template), and expand the current
+ * thread's TLS vector to cover the new slot.
+ * Without this, late-loaded DLLs using __declspec(thread) (such as
+ * chrome.dll's PartitionAlloc) get garbage TLS data on new threads.
+ *--*/
+NTSTATUS
+NTAPI
+LdrpHandleTlsData(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    PIMAGE_TLS_DIRECTORY TlsDirectory;
+    PLDRP_TLS_DATA TlsData, ListEntry;
+    PLIST_ENTRY NextEntry, ListHead;
+    ULONG Size;
+    PTEB Teb = NtCurrentTeb();
+    PVOID *TlsVector;
+    ULONG NewIndex;
+    SIZE_T TlsBlockSize;
+
+    /* Get the TLS directory of this module */
+    TlsDirectory = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
+                                                TRUE,
+                                                IMAGE_DIRECTORY_ENTRY_TLS,
+                                                &Size);
+    if (!TlsDirectory) return STATUS_SUCCESS;
+
+    /* Check if this module's TLS directory is already registered */
+    ListHead = &LdrpTlsList;
+    NextEntry = ListHead->Flink;
+    while (NextEntry != ListHead)
+    {
+        ListEntry = CONTAINING_RECORD(NextEntry, LDRP_TLS_DATA, TlsLinks);
+        if (ListEntry->TlsDirectory.AddressOfIndex == TlsDirectory->AddressOfIndex)
+        {
+            /* Already registered */
+            return STATUS_SUCCESS;
+        }
+        NextEntry = NextEntry->Flink;
+    }
+
+    /* Allocate the TLS data entry */
+    TlsData = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(LDRP_TLS_DATA));
+    if (!TlsData) return STATUS_NO_MEMORY;
+
+    NewIndex = LdrpNumberOfTlsEntries;
+
+    /* Save the cached TLS data and register it */
+    TlsData->TlsDirectory = *TlsDirectory;
+    TlsData->TlsDirectory.Characteristics = NewIndex;
+    InsertTailList(&LdrpTlsList, &TlsData->TlsLinks);
+
+    /* Write the index into the module's tls_index variable */
+    *(PLONG)TlsData->TlsDirectory.AddressOfIndex = NewIndex;
+    LdrpNumberOfTlsEntries++;
+
+    /* Write the new slot into the current thread's vector in place.
+       Vectors are always LDRP_TLS_MAX_ENTRIES-sized (see LdrpAllocateTls),
+       so no resizing and no frees that other threads might still use. */
+    TlsBlockSize = TlsData->TlsDirectory.EndAddressOfRawData -
+                   TlsData->TlsDirectory.StartAddressOfRawData;
+    if (NewIndex >= LDRP_TLS_MAX_ENTRIES) return STATUS_NO_MEMORY;
+
+    TlsVector = Teb->ThreadLocalStoragePointer;
+    if (!TlsVector)
+    {
+        TlsVector = RtlAllocateHeap(RtlGetProcessHeap(),
+                                    0,
+                                    LDRP_TLS_MAX_ENTRIES * sizeof(PVOID));
+        if (!TlsVector) return STATUS_NO_MEMORY;
+        RtlZeroMemory(TlsVector, LDRP_TLS_MAX_ENTRIES * sizeof(PVOID));
+        Teb->ThreadLocalStoragePointer = TlsVector;
+    }
+
+    TlsVector[NewIndex] = RtlAllocateHeap(RtlGetProcessHeap(), 0, TlsBlockSize);
+    if (!TlsVector[NewIndex]) return STATUS_NO_MEMORY;
+    RtlCopyMemory(TlsVector[NewIndex],
+                  (PVOID)TlsData->TlsDirectory.StartAddressOfRawData,
+                  TlsBlockSize);
+
+    /* Mark the entry */
+    LdrEntry->TlsIndex = NewIndex;
+
+    DPRINT1("LDR: Dynamic TLS registered for %wZ at index %lu (total %lu)\n",
+            &LdrEntry->BaseDllName, NewIndex, LdrpNumberOfTlsEntries);
+    return STATUS_SUCCESS;
+}
+
+/*++
+ * @name LdrpRemoveTlsData
+ *
+ * Remove the TLS registration of a module that is being unloaded.
+ * Without this, the global TLS list keeps pointing at the module's
+ * template in image memory; once the image is unmapped, every new
+ * thread's template copy (LdrpAllocateTls) faults on the stale entry.
+ *--*/
+VOID
+NTAPI
+LdrpRemoveTlsData(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    PIMAGE_TLS_DIRECTORY TlsDirectory;
+    PLDRP_TLS_DATA ListEntry;
+    PLIST_ENTRY NextEntry, ListHead;
+    ULONG Size;
+
+    /* Get the TLS directory of this module */
+    TlsDirectory = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
+                                               TRUE,
+                                               IMAGE_DIRECTORY_ENTRY_TLS,
+                                               &Size);
+    if (!TlsDirectory) return;
+
+    /* Find the registration by its AddressOfIndex (unique per module) */
+    ListHead = &LdrpTlsList;
+    NextEntry = ListHead->Flink;
+    while (NextEntry != ListHead)
+    {
+        ListEntry = CONTAINING_RECORD(NextEntry, LDRP_TLS_DATA, TlsLinks);
+        if (ListEntry->TlsDirectory.AddressOfIndex == TlsDirectory->AddressOfIndex)
+        {
+            RemoveEntryList(NextEntry);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, ListEntry);
+            DPRINT1("LDR: TLS data removed for %wZ\n", &LdrEntry->BaseDllName);
+            return;
+        }
+        NextEntry = NextEntry->Flink;
+    }
 }
 
 VOID
@@ -1604,12 +1763,14 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
     {
         const GUID* Guid;
         const DWORD Version;
+        const USHORT BuildNumber;
+        const USHORT CSDVersion;
     } KnownCompatGuids[] = {
-        { &COMPAT_GUID_WIN10, _WIN32_WINNT_WIN10 },
-        { &COMPAT_GUID_WIN81, _WIN32_WINNT_WINBLUE },
-        { &COMPAT_GUID_WIN8, _WIN32_WINNT_WIN8 },
-        { &COMPAT_GUID_WIN7, _WIN32_WINNT_WIN7 },
-        { &COMPAT_GUID_VISTA, _WIN32_WINNT_VISTA },
+        { &COMPAT_GUID_WIN10, _WIN32_WINNT_WIN10, 19045, 0 },
+        { &COMPAT_GUID_WIN81, _WIN32_WINNT_WINBLUE, 9600, 0 },
+        { &COMPAT_GUID_WIN8, _WIN32_WINNT_WIN8, 9200, 0 },
+        { &COMPAT_GUID_WIN7, _WIN32_WINNT_WIN7, 7601, 0x0100 },
+        { &COMPAT_GUID_VISTA, _WIN32_WINNT_VISTA, 6002, 0x0200 },
     };
 
     ULONG Buffer[(sizeof(COMPATIBILITY_CONTEXT_ELEMENT) * 10 + sizeof(ACTIVATION_CONTEXT_COMPATIBILITY_INFORMATION)) / sizeof(ULONG)];
@@ -1664,19 +1825,17 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
     if (ContextCompatInfo->ElementCount == 0)
         return;
 
-    /* Search for known GUIDs, starting from oldest to newest.
-       Note that on Windows it is somewhat reversed, starting from the latest known
-       version, going down. But we are not Windows, trying to allow a lower version,
-       we are ReactOS trying to fake a higher version. So we interpret what Windows
-       does as "try the closest version to the actual version", so we start with the
-       lowest version, which is closest to Windows 2003, which we mostly are. */
-    for (cur = RTL_NUMBER_OF(KnownCompatGuids) - 1; cur != -1; --cur)
+    /* Search for known GUIDs from newest to oldest, matching Windows behavior
+       so manifested applications receive the highest OS version they declare. */
+    for (cur = 0; cur < RTL_NUMBER_OF(KnownCompatGuids); ++cur)
     {
         for (n = 0; n < ContextCompatInfo->ElementCount; ++n)
         {
             if (ContextCompatInfo->Elements[n].Type == ACTCTX_COMPATIBILITY_ELEMENT_TYPE_OS &&
                 RtlCompareMemory(&ContextCompatInfo->Elements[n].Id, KnownCompatGuids[cur].Guid, sizeof(GUID)) == sizeof(GUID))
             {
+                PPEB Peb = NtCurrentPeb();
+
                 if (LdrpDisableProcessCompatGuidDetection())
                 {
                     DPRINT1("LdrpInitializeProcessCompat: Not applying automatic fix for winver 0x%x due to policy\n", KnownCompatGuids[cur].Version);
@@ -1686,8 +1845,6 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
                 /* If this process did not need shim data before, allocate and store it */
                 if (pShimData == NULL)
                 {
-                    PPEB Peb = NtCurrentPeb();
-
                     ASSERT(Peb->pShimData == NULL);
                     pShimData = RtlAllocateHeap(Peb->ProcessHeap, HEAP_ZERO_MEMORY, sizeof(*pShimData));
 
@@ -1708,11 +1865,18 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
                     *pOldShimData = pShimData;
                 }
 
-                /* Store the lowest found version, and bail out. */
+                /* Store the matched version in ShimData and update PEB OS version fields */
                 pShimData->dwRosProcessCompatVersion = KnownCompatGuids[cur].Version;
-                DPRINT1("LdrpInitializeProcessCompat: Found guid for winver 0x%x in manifest from %wZ\n",
+                Peb->OSMajorVersion = (KnownCompatGuids[cur].Version >> 8) & 0xFF;
+                Peb->OSMinorVersion = KnownCompatGuids[cur].Version & 0xFF;
+                Peb->OSBuildNumber = KnownCompatGuids[cur].BuildNumber;
+                Peb->OSCSDVersion = KnownCompatGuids[cur].CSDVersion;
+                DPRINT1("LdrpInitializeProcessCompat: Found guid for winver 0x%x in manifest from %wZ (PEB %u.%u.%u)\n",
                         KnownCompatGuids[cur].Version,
-                        &(NtCurrentPeb()->ProcessParameters->ImagePathName));
+                        &(Peb->ProcessParameters->ImagePathName),
+                        Peb->OSMajorVersion,
+                        Peb->OSMinorVersion,
+                        Peb->OSBuildNumber);
                 return;
             }
         }

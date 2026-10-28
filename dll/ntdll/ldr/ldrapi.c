@@ -1527,6 +1527,10 @@ LdrUnloadDll(
             DPRINT1(".NET Images are not supported yet\n");
         }
 
+        /* Remove any TLS data this module registered, so new threads
+           don't copy templates from the soon-to-be unmapped image */
+        LdrpRemoveTlsData(CurrentEntry);
+
         /* Check if we should unmap*/
         if (!(CurrentEntry->Flags & LDR_COR_OWNS_UNMAP))
         {

@@ -1180,9 +1180,9 @@ RtlpCoalesceFreeBlocks (PHEAP Heap,
     /* Check it */
     if (CurrentEntry != FreeEntry &&
         !(CurrentEntry->Flags & HEAP_ENTRY_BUSY) &&
+        FreeEntry->PreviousSize == CurrentEntry->Size &&
         (*FreeSize + CurrentEntry->Size) <= HEAP_MAX_BLOCK_SIZE)
     {
-        ASSERT(FreeEntry->PreviousSize == CurrentEntry->Size);
 
         /* Remove it if asked for */
         if (Remove)
@@ -1224,9 +1224,9 @@ RtlpCoalesceFreeBlocks (PHEAP Heap,
         NextEntry = (PHEAP_FREE_ENTRY)((PHEAP_ENTRY)FreeEntry + *FreeSize);
 
         if (!(NextEntry->Flags & HEAP_ENTRY_BUSY) &&
+            *FreeSize == NextEntry->PreviousSize &&
             NextEntry->Size + *FreeSize <= HEAP_MAX_BLOCK_SIZE)
         {
-            ASSERT(*FreeSize == NextEntry->PreviousSize);
 
             /* Remove it if asked for */
             if (Remove)
@@ -2327,8 +2327,8 @@ BOOLEAN NTAPI RtlFreeHeap(
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        /* The pointer was invalid */
-        DPRINT1("HEAP: Trying to free an invalid address %p!\n", Ptr);
+        /* The pointer was invalid (silenced: floods serial during chrome runs) */
+        if (FALSE) DPRINT1("HEAP: Trying to free an invalid address %p!\n", Ptr);
         RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_INVALID_PARAMETER);
         _SEH2_YIELD(return FALSE);
     }

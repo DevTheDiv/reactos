@@ -72,6 +72,13 @@ NTSTATUS NTAPI LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL);
 VOID NTAPI LdrpInitializeThread(IN PCONTEXT Context);
 NTSTATUS NTAPI LdrpInitializeTls(VOID);
 NTSTATUS NTAPI LdrpAllocateTls(VOID);
+NTSTATUS NTAPI LdrpHandleTlsData(IN PLDR_DATA_TABLE_ENTRY LdrEntry);
+VOID NTAPI LdrpRemoveTlsData(IN PLDR_DATA_TABLE_ENTRY LdrEntry);
+
+/* TLS vectors are always allocated with this many slots so that
+   dynamically (late) loaded TLS modules can claim higher indexes
+   without resizing/freeing vectors that other threads still use. */
+#define LDRP_TLS_MAX_ENTRIES 128
 VOID NTAPI LdrpFreeTls(VOID);
 VOID NTAPI LdrpCallTlsInitializers(IN PLDR_DATA_TABLE_ENTRY LdrEntry, IN ULONG Reason);
 BOOLEAN NTAPI LdrpCallInitRoutine(IN PDLL_INIT_ROUTINE EntryPoint, IN PVOID BaseAddress, IN ULONG Reason, IN PVOID Context);
