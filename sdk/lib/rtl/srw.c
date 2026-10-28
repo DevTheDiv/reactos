@@ -80,6 +80,8 @@ typedef struct _RTLP_SRWLOCK_WAITBLOCK
 } volatile RTLP_SRWLOCK_WAITBLOCK, *PRTLP_SRWLOCK_WAITBLOCK;
 
 
+static VOID RtlpWakeSRWWaiter(volatile LONG *Wake);
+
 static VOID
 NTAPI
 RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
@@ -127,8 +129,7 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
 
     if (FirstWaitBlock->Exclusive)
     {
-        (void)InterlockedOr(&FirstWaitBlock->Wake,
-                            TRUE);
+        RtlpWakeSRWWaiter(&FirstWaitBlock->Wake);
     }
     else
     {
@@ -141,8 +142,7 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
         {
             NextWake = WakeChain->Next;
 
-            (void)InterlockedOr((PLONG)&WakeChain->Wake,
-                                TRUE);
+            RtlpWakeSRWWaiter(&WakeChain->Wake);
 
             WakeChain = NextWake;
         } while (WakeChain != NULL);
@@ -180,8 +180,7 @@ RtlpReleaseWaitBlockLockLastShared(IN OUT PRTL_SRWLOCK SRWLock,
 
     (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
 
-    (void)InterlockedOr(&FirstWaitBlock->Wake,
-                        TRUE);
+    RtlpWakeSRWWaiter(&FirstWaitBlock->Wake);
 }
 
 
@@ -227,97 +226,73 @@ RtlpAcquireWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
 }
 
 
+/* Wake states: spinning, registered for a keyed-event wait, and released.
+ * Register before entering the kernel so that a concurrent release can pair
+ * with the wait even if the releasing thread reaches the kernel first. */
+#define RTL_SRW_WAKE_SPINNING 0
+#define RTL_SRW_WAKE_RELEASED 1
+#define RTL_SRW_WAKE_WAITING  2
+#define RTL_SRW_SPIN_COUNT    256
 static VOID
-NTAPI
-RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
-                                IN PRTLP_SRWLOCK_WAITBLOCK WaitBlock)
+RtlpWakeSRWWaiter(volatile LONG *Wake)
 {
-    LONG_PTR CurrentValue;
-    ULONG SpinCount = 0;
+    /* Do not access the waiter's stack after publishing RELEASED. */
+    PVOID Key = (PVOID)Wake;
+    LONG Previous;
+    NTSTATUS Status;
 
-    while (1)
+    Previous = InterlockedExchange(Wake, RTL_SRW_WAKE_RELEASED);
+    if (Previous == RTL_SRW_WAKE_WAITING)
     {
-        CurrentValue = *(volatile LONG_PTR *)&SRWLock->Ptr;
-        if (!(CurrentValue & RTL_SRWLOCK_SHARED))
-        {
-            if (CurrentValue & RTL_SRWLOCK_CONTENDED)
-            {
-                if (WaitBlock->Wake != 0)
-                {
-                    /* Our wait block became the first one
-                       in the chain, we own the lock now! */
-                    break;
-                }
-            }
-            else
-            {
-                /* The last wait block was removed and/or we're
-                   finally a simple exclusive lock. This means we
-                   don't need to wait anymore, we acquired the lock! */
-                break;
-            }
-        }
-
-        if (++SpinCount > 100000000)
-        {
-            SpinCount = 0;
-            DPRINT1("SRWLOCK %p: exclusive waiter spin-stuck, waitblock=%p "
-                    "wake=%lld ptr=%p\n",
-                    SRWLock, WaitBlock, (LONGLONG)WaitBlock->Wake,
-                    (PVOID)SRWLock->Ptr);
-        }
-        YieldProcessor();
+        Status = NtReleaseKeyedEvent(NULL, Key, FALSE, NULL);
+        ASSERT(Status == STATUS_SUCCESS);
     }
 }
 
+static VOID
+RtlpWaitForSRWWake(volatile LONG *Wake)
+{
+    ULONG Spins = 0;
+    NTSTATUS Status;
+
+    while (!(*Wake & RTL_SRW_WAKE_RELEASED))
+    {
+        if (Spins++ < RTL_SRW_SPIN_COUNT)
+        {
+            YieldProcessor();
+            continue;
+        }
+
+        /* Always wait after registration, even if Wake has since changed.
+         * Otherwise the releaser could block forever without a partner.
+         * The rendezvous also keeps this stack slot alive until the release
+         * has finished using its address as a key. */
+        if (InterlockedCompareExchange(Wake, RTL_SRW_WAKE_WAITING, RTL_SRW_WAKE_SPINNING) == RTL_SRW_WAKE_SPINNING)
+        {
+            Status = NtWaitForKeyedEvent(NULL, (PVOID)Wake, FALSE, NULL);
+            ASSERT(Status == STATUS_SUCCESS);
+        }
+    }
+}
+
+static VOID
+NTAPI
+RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
+                              IN PRTLP_SRWLOCK_WAITBLOCK WaitBlock)
+{
+    UNREFERENCED_PARAMETER(SRWLock);
+    RtlpWaitForSRWWake(&WaitBlock->Wake);
+}
 
 static VOID
 NTAPI
 RtlpAcquireSRWLockSharedWait(IN OUT PRTL_SRWLOCK SRWLock,
-                             IN OUT PRTLP_SRWLOCK_WAITBLOCK FirstWait  OPTIONAL,
-                             IN OUT PRTLP_SRWLOCK_SHARED_WAKE WakeChain)
+                           IN OUT PRTLP_SRWLOCK_WAITBLOCK FirstWait OPTIONAL,
+                           IN OUT PRTLP_SRWLOCK_SHARED_WAKE WakeChain)
 {
-    if (FirstWait != NULL)
-    {
-        while (WakeChain->Wake == 0)
-        {
-            YieldProcessor();
-        }
-    }
-    else
-    {
-        LONG_PTR CurrentValue;
-
-        while (1)
-        {
-            CurrentValue = *(volatile LONG_PTR *)&SRWLock->Ptr;
-            if (CurrentValue & RTL_SRWLOCK_SHARED)
-            {
-                /* The RTL_SRWLOCK_OWNED bit always needs to be set when
-                   RTL_SRWLOCK_SHARED is set! */
-                ASSERT(CurrentValue & RTL_SRWLOCK_OWNED);
-
-                if (CurrentValue & RTL_SRWLOCK_CONTENDED)
-                {
-                    if (WakeChain->Wake != 0)
-                    {
-                        /* Our wait block became the first one
-                           in the chain, we own the lock now! */
-                        break;
-                    }
-                }
-                else
-                {
-                    /* The last wait block was removed and/or we're
-                       finally a simple shared lock. This means we
-                       don't need to wait anymore, we acquired the lock! */
-                    break;
-                }
-            }
-
-            YieldProcessor();
-        }
-    }
+    UNREFERENCED_PARAMETER(SRWLock);
+    UNREFERENCED_PARAMETER(FirstWait);
+    RtlpWaitForSRWWake(&WakeChain->Wake);
 }
 
 
