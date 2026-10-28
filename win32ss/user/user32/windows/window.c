@@ -1570,6 +1570,14 @@ IsWindow(HWND hWnd)
  * @implemented
  */
 BOOL WINAPI
+IsWindowArranged(HWND hWnd)
+{
+    /* ReactOS does not implement persistent snap arrangement state. */
+    UNREFERENCED_PARAMETER(hWnd);
+    return FALSE;
+}
+
+BOOL WINAPI
 IsWindowUnicode(HWND hWnd)
 {
     PWND Wnd = ValidateHwnd(hWnd);

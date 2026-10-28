@@ -466,6 +466,7 @@
 @ stdcall -stub -version=0xA00+ IsValidDpiAwarenessContext(long)
 @ stdcall IsWinEventHookInstalled(long)
 @ stdcall IsWindow(long)
+@ stdcall -version=0x602+ IsWindowArranged(long)
 @ stdcall IsWindowEnabled(long)
 @ stdcall IsWindowInDestroy(long)
 @ stdcall -version=0x600+ IsWindowRedirectedForPrint(long)

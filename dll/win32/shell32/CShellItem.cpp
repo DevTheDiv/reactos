@@ -637,4 +637,35 @@ SHGetPropertyStoreFromParsingName(
     return hr;
 }
 
+/***********************************************************************
+ *   SHGetPropertyStoreForWindow [SHELL32.@]
+ */
+EXTERN_C HRESULT WINAPI
+SHGetPropertyStoreForWindow(HWND hwnd, REFIID riid, void **ppv)
+{
+    FIXME("(%p,%s,%p) stub\n", hwnd, debugstr_guid(&riid), ppv);
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+
+    /* Window property stores are not supported yet. Let callers handle the
+     * failure instead of raising a missing delay-load import exception. */
+    return E_NOTIMPL;
+}
+
+/***********************************************************************
+ *   SHCreateAssociationRegistration [SHELL32.@]
+ */
+EXTERN_C HRESULT WINAPI
+SHCreateAssociationRegistration(REFIID riid, void **ppv)
+{
+    FIXME("(%s,%p) stub\n", debugstr_guid(&riid), ppv);
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+    return E_NOTIMPL;
+}
+
 #endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA */

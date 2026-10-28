@@ -146,6 +146,21 @@ GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
 }
 
 /*
+ * ReactOS does not yet accumulate suspend time separately or publish the
+ * counter baseline needed to interpolate interrupt time between clock ticks.
+ * Provide the interrupt clock as a coarse fallback, in 100-nanosecond units.
+ */
+VOID
+WINAPI
+QueryUnbiasedInterruptTimePrecise(OUT PULONGLONG UnbiasedTime)
+{
+    LARGE_INTEGER InterruptTime;
+
+    InterruptTime = KiReadSystemTime(&SharedUserData->InterruptTime);
+    *UnbiasedTime = InterruptTime.QuadPart;
+}
+
+/*
  * @implemented
  */
 BOOL
