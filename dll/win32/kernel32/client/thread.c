@@ -360,6 +360,34 @@ Quit:
 /*
  * @implemented
  */
+HANDLE
+WINAPI
+CreateRemoteThreadEx(IN HANDLE hProcess,
+                     IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                     IN SIZE_T dwStackSize,
+                     IN LPTHREAD_START_ROUTINE lpStartAddress,
+                     IN LPVOID lpParameter,
+                     IN DWORD dwCreationFlags,
+                     IN LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+                     OUT LPDWORD lpThreadId)
+{
+    if (lpAttributeList)
+    {
+        DPRINT1("CreateRemoteThreadEx: lpAttributeList is ignored\n");
+    }
+
+    return CreateRemoteThread(hProcess,
+                              lpThreadAttributes,
+                              dwStackSize,
+                              lpStartAddress,
+                              lpParameter,
+                              dwCreationFlags,
+                              lpThreadId);
+}
+
+/*
+ * @implemented
+ */
 VOID
 WINAPI
 ExitThread(IN DWORD uExitCode)

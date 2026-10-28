@@ -72,7 +72,7 @@ GetQueuedCompletionStatusEx(
                                        (PVOID*)&Overlapped,
                                        &IoStatus,
                                        &ZeroTimeout);
-        if (!NT_SUCCESS(Status))
+        if (Status != STATUS_SUCCESS)
         {
             /* Nothing more ready right now -- we already have at least one entry */
             break;

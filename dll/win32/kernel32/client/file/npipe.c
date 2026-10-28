@@ -384,13 +384,17 @@ CreateNamedPipeW(LPCWSTR lpName,
         DefaultTimeOut.QuadPart = -500000;
     }
 
+    /* Check for first pipe instance flag */
+    ULONG CreateDisposition = (dwOpenMode & FILE_FLAG_FIRST_PIPE_INSTANCE) ?
+                              FILE_CREATE : FILE_OPEN_IF;
+
     /* Now create the pipe */
     Status = NtCreateNamedPipeFile(&PipeHandle,
                                    DesiredAccess,
                                    &ObjectAttributes,
                                    &Iosb,
                                    ShareAccess,
-                                   FILE_OPEN_IF,
+                                   CreateDisposition,
                                    CreateOptions,
                                    WriteModeMessage,
                                    ReadModeMessage,
@@ -420,6 +424,8 @@ CreateNamedPipeW(LPCWSTR lpName,
         BaseSetLastNTError (Status);
         return INVALID_HANDLE_VALUE;
     }
+
+    SetLastError(Iosb.Information == FILE_CREATED ? ERROR_SUCCESS : ERROR_ALREADY_EXISTS);
 
     /* Return the handle */
     return PipeHandle;

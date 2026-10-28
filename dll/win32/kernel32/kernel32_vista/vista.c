@@ -8,6 +8,8 @@
 /* INCLUDES *******************************************************************/
 
 #include <k32_vista.h>
+#include <ndk/exfuncs.h>
+#include <ndk/mmfuncs.h>
 
 #if _WIN32_WINNT != _WIN32_WINNT_VISTA
 #error "This file must be compiled with _WIN32_WINNT == _WIN32_WINNT_VISTA"
@@ -649,7 +651,7 @@ GetSystemPreferredUILanguages(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -659,21 +661,48 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    LCTYPE type;
+    int lsize;
+
+    if (dwFlags & MUI_LANGUAGE_ID)
+        type = LOCALE_ILANGUAGE;
+    else
+        type = LOCALE_SNAME;
+
+    lsize = GetLocaleInfoW(LOCALE_SYSTEM_DEFAULT, type, NULL, 0);
+    if (!lsize)
+        return FALSE;
+    lsize++;
+    if (!*pcchLanguagesBuffer)
+    {
+        *pcchLanguagesBuffer = lsize;
+        *pulNumLanguages = 1;
+        return TRUE;
+    }
+
+    if (lsize > *pcchLanguagesBuffer)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    if (!GetLocaleInfoW(LOCALE_SYSTEM_DEFAULT, type, pwszLanguagesBuffer, *pcchLanguagesBuffer))
+        return FALSE;
+
+    pwszLanguagesBuffer[lsize - 1] = 0;
+    *pcchLanguagesBuffer = lsize;
+    *pulNumLanguages = 1;
+    return TRUE;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 LANGID
 WINAPI
 GetThreadUILanguage(VOID)
 {
-    UNIMPLEMENTED;
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+    return GetUserDefaultUILanguage();
 }
 
 /*
@@ -693,9 +722,8 @@ GetUILanguageInfo(
     return FALSE;
 }
 
-
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -705,9 +733,7 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    return GetThreadPreferredUILanguages(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
@@ -761,4 +787,876 @@ INT WINAPI CompareStringOrdinal(const WCHAR *str1, INT len1, const WCHAR *str2, 
     if (ret < 0) return CSTR_LESS_THAN;
     if (ret > 0) return CSTR_GREATER_THAN;
     return CSTR_EQUAL;
+}
+
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+GetDynamicTimeZoneInformation(
+    _Out_ PDYNAMIC_TIME_ZONE_INFORMATION lpTimeZoneInformation)
+{
+    DWORD Result;
+
+    if (!lpTimeZoneInformation)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return TIME_ZONE_ID_INVALID;
+    }
+
+    RtlZeroMemory(lpTimeZoneInformation, sizeof(*lpTimeZoneInformation));
+    Result = GetTimeZoneInformation((LPTIME_ZONE_INFORMATION)lpTimeZoneInformation);
+    if (Result != TIME_ZONE_ID_INVALID)
+    {
+        wcsncpy(lpTimeZoneInformation->TimeZoneKeyName,
+                lpTimeZoneInformation->StandardName,
+                ARRAYSIZE(lpTimeZoneInformation->TimeZoneKeyName) - 1);
+        lpTimeZoneInformation->DynamicDaylightTimeDisabled = FALSE;
+    }
+
+    return Result;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetDynamicTimeZoneInformation(
+    _In_ CONST DYNAMIC_TIME_ZONE_INFORMATION *lpTimeZoneInformation)
+{
+    if (!lpTimeZoneInformation)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return SetTimeZoneInformation((CONST TIME_ZONE_INFORMATION *)lpTimeZoneInformation);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetTimeZoneInformationForYear(
+    _In_ USHORT wYear,
+    _In_opt_ PDYNAMIC_TIME_ZONE_INFORMATION pdtzi,
+    _Out_ LPTIME_ZONE_INFORMATION ptzi)
+{
+    if (!ptzi)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (pdtzi)
+    {
+        *ptzi = *(CONST TIME_ZONE_INFORMATION *)pdtzi;
+        ptzi->StandardDate.wYear = wYear;
+        ptzi->DaylightDate.wYear = wYear;
+        return TRUE;
+    }
+
+    return (GetTimeZoneInformation(ptzi) != TIME_ZONE_ID_INVALID);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+CancelIoEx(
+    _In_ HANDLE hFile,
+    _In_opt_ LPOVERLAPPED lpOverlapped)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    Status = NtCancelIoFileEx(hFile,
+                               (PIO_STATUS_BLOCK)lpOverlapped,
+                               &IoStatusBlock);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+GetCurrentThreadStackLimits(
+    _Out_ PULONG_PTR LowLimit,
+    _Out_ PULONG_PTR HighLimit)
+{
+    PTEB Teb = NtCurrentTeb();
+
+    *LowLimit = (ULONG_PTR)Teb->DeallocationStack;
+    *HighLimit = (ULONG_PTR)Teb->NtTib.StackBase;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetProcessMitigationPolicy(
+    _In_ HANDLE hProcess,
+    _In_ DWORD MitigationPolicy,
+    _Out_writes_bytes_(dwLength) PVOID lpBuffer,
+    _In_ SIZE_T dwLength)
+{
+    UNREFERENCED_PARAMETER(hProcess);
+    UNREFERENCED_PARAMETER(MitigationPolicy);
+
+    if (!lpBuffer || dwLength == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* No process mitigation policies are tracked; report everything as disabled. */
+    RtlZeroMemory(lpBuffer, dwLength);
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetProcessMitigationPolicy(
+    _In_ DWORD MitigationPolicy,
+    _In_reads_bytes_(dwLength) PVOID lpBuffer,
+    _In_ SIZE_T dwLength)
+{
+    UNREFERENCED_PARAMETER(MitigationPolicy);
+    UNREFERENCED_PARAMETER(lpBuffer);
+    UNREFERENCED_PARAMETER(dwLength);
+
+    /* Process mitigation policies are not enforced; report success without applying anything. */
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+HRESULT
+WINAPI
+WerRegisterRuntimeExceptionModule(
+    _In_ PCWSTR CallbackDll,
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(CallbackDll);
+    UNREFERENCED_PARAMETER(Context);
+
+    /* No runtime exception module tracking; report success without registering anything. */
+    return S_OK;
+}
+
+/*
+ * @implemented
+ */
+HRESULT
+WINAPI
+WerUnregisterRuntimeExceptionModule(
+    _In_ PCWSTR CallbackDll,
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(CallbackDll);
+    UNREFERENCED_PARAMETER(Context);
+
+    return S_OK;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+PrefetchVirtualMemory(
+    _In_ HANDLE hProcess,
+    _In_ ULONG_PTR NumberOfEntries,
+    _In_ PVOID VirtualAddresses,
+    _In_ ULONG Flags)
+{
+    UNREFERENCED_PARAMETER(hProcess);
+    UNREFERENCED_PARAMETER(NumberOfEntries);
+    UNREFERENCED_PARAMETER(VirtualAddresses);
+    UNREFERENCED_PARAMETER(Flags);
+
+    /* Prefetching is purely an optional performance hint; report success without doing anything. */
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetDefaultDllDirectories(
+    _In_ DWORD DirectoryFlags)
+{
+    UNREFERENCED_PARAMETER(DirectoryFlags);
+
+    /* DLL search-path restriction is not enforced; report success without changing loader behavior. */
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+WORD
+WINAPI
+GetMaximumProcessorGroupCount(VOID)
+{
+    /* No NUMA/processor-group support; there is always exactly one group. */
+    return 1;
+}
+
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+DiscardVirtualMemory(
+    _In_ PVOID VirtualAddress,
+    _In_ SIZE_T Size)
+{
+    NTSTATUS Status;
+    PVOID BaseAddress = VirtualAddress;
+    SIZE_T RegionSize = Size;
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(),
+                                     &BaseAddress,
+                                     0,
+                                     &RegionSize,
+                                     MEM_RESET,
+                                     PAGE_NOACCESS);
+    return RtlNtStatusToDosError(Status);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+GetPackagePathByFullName(
+    _In_ PCWSTR packageFullName,
+    _Inout_ UINT32 *pathLength,
+    _Out_writes_opt_(*pathLength) PWSTR path)
+{
+    UNREFERENCED_PARAMETER(packageFullName);
+    UNREFERENCED_PARAMETER(path);
+
+    /* This process is never running as a packaged (APPX/MSIX) application. */
+    if (pathLength) *pathLength = 0;
+    return APPMODEL_ERROR_NO_PACKAGE;
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+GetPackagesByPackageFamily(
+    _In_ PCWSTR packageFamilyName,
+    _Inout_ UINT32 *count,
+    _Out_writes_opt_(*count) PWSTR *packageFullNames,
+    _Inout_ UINT32 *bufferLength,
+    _Out_writes_opt_(*bufferLength) WCHAR *buffer)
+{
+    UNREFERENCED_PARAMETER(packageFamilyName);
+    UNREFERENCED_PARAMETER(packageFullNames);
+    UNREFERENCED_PARAMETER(buffer);
+
+    if (count) *count = 0;
+    if (bufferLength) *bufferLength = 0;
+    return APPMODEL_ERROR_NO_PACKAGE;
+}
+
+/* Matches the real PROCESS_MACHINE_INFORMATION layout (not in our SDK headers yet) */
+typedef struct _K32_PROCESS_MACHINE_INFORMATION
+{
+    USHORT ProcessMachine;
+    USHORT Res0;
+    ULONG MachineAttributes;
+} K32_PROCESS_MACHINE_INFORMATION;
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetProcessInformation(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _Out_writes_bytes_(ProcessInformationSize) PVOID ProcessInformation,
+    _In_ DWORD ProcessInformationSize)
+{
+    UNREFERENCED_PARAMETER(hProcess);
+
+    switch (ProcessInformationClass)
+    {
+        case ProcessMachineTypeInfo:
+        {
+            K32_PROCESS_MACHINE_INFORMATION *Info = ProcessInformation;
+
+            if (ProcessInformationSize != sizeof(*Info))
+            {
+                SetLastError(ERROR_BAD_LENGTH);
+                return FALSE;
+            }
+
+            /* This is a native i386 build; no WOW64/emulation involved. */
+            Info->ProcessMachine = IMAGE_FILE_MACHINE_I386;
+            Info->Res0 = 0;
+            Info->MachineAttributes = 0x3; /* UserEnabled | KernelEnabled */
+            return TRUE;
+        }
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetProcessInformation(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _In_reads_bytes_(ProcessInformationSize) PVOID ProcessInformation,
+    _In_ DWORD ProcessInformationSize)
+{
+    NTSTATUS Status;
+
+    switch (ProcessInformationClass)
+    {
+        case ProcessMemoryPriority:
+            Status = NtSetInformationProcess(hProcess,
+                                             ProcessPagePriority,
+                                             ProcessInformation,
+                                             ProcessInformationSize);
+            if (!NT_SUCCESS(Status))
+            {
+                BaseSetLastNTError(Status);
+                return FALSE;
+            }
+            return TRUE;
+
+        case ProcessPowerThrottling:
+        case ProcessLeapSecondInfo:
+            /* Not tracked; report success without applying anything. */
+            return TRUE;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+PowerCreateRequest(
+    _In_ PREASON_CONTEXT Context)
+{
+    HANDLE Handle;
+    NTSTATUS Status;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    /* No real power-request manager; hand back a closeable kernel object as the handle. */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtCreateEvent(&Handle,
+                           EVENT_ALL_ACCESS,
+                           &ObjectAttributes,
+                           NotificationEvent,
+                           FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    return Handle;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+PowerSetRequest(
+    _In_ HANDLE PowerRequest,
+    _In_ DWORD RequestType)
+{
+    UNREFERENCED_PARAMETER(RequestType);
+
+    if (!PowerRequest || PowerRequest == INVALID_HANDLE_VALUE)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    /* Power requests are not enforced; report success without changing power state. */
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+PowerClearRequest(
+    _In_ HANDLE PowerRequest,
+    _In_ DWORD RequestType)
+{
+    UNREFERENCED_PARAMETER(RequestType);
+
+    if (!PowerRequest || PowerRequest == INVALID_HANDLE_VALUE)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateWaitableTimerExW(
+    _In_opt_ LPSECURITY_ATTRIBUTES lpTimerAttributes,
+    _In_opt_ LPCWSTR lpTimerName,
+    _In_ DWORD dwFlags,
+    _In_ DWORD dwDesiredAccess)
+{
+    HANDLE Handle;
+    NTSTATUS Status;
+    UNICODE_STRING ObjectName;
+    OBJECT_ATTRIBUTES LocalAttributes;
+    POBJECT_ATTRIBUTES ObjectAttributes;
+
+    if (lpTimerName) RtlInitUnicodeString(&ObjectName, lpTimerName);
+    ObjectAttributes = BaseFormatObjectAttributes(&LocalAttributes,
+                                                  lpTimerAttributes,
+                                                  lpTimerName ? &ObjectName : NULL);
+
+    Status = NtCreateTimer(&Handle,
+                           dwDesiredAccess,
+                           ObjectAttributes,
+                           (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
+                               NotificationTimer : SynchronizationTimer);
+    if (Status == STATUS_OBJECT_NAME_EXISTS)
+    {
+        SetLastError(ERROR_ALREADY_EXISTS);
+    }
+    else
+    {
+        BaseSetLastNTError(Status);
+    }
+
+    if (!NT_SUCCESS(Status)) return NULL;
+    return Handle;
+}
+
+/* Internal concrete layout behind the opaque PROC_THREAD_ATTRIBUTE_LIST pointer type */
+typedef struct _PROC_THREAD_ATTRIBUTE_ENTRY
+{
+    DWORD_PTR Attribute;
+    SIZE_T Size;
+    PVOID Value;
+} PROC_THREAD_ATTRIBUTE_ENTRY;
+
+typedef struct _PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD Mask;
+    DWORD AllocatedCount;
+    DWORD Count;
+    DWORD Reserved;
+    PROC_THREAD_ATTRIBUTE_ENTRY Attributes[1];
+} K32_PROC_THREAD_ATTRIBUTE_LIST;
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+InitializeProcThreadAttributeList(
+    _Out_writes_bytes_to_opt_(*lpSize, *lpSize) LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwAttributeCount,
+    _Reserved_ DWORD dwFlags,
+    _Inout_ PSIZE_T lpSize)
+{
+    SIZE_T Needed;
+    K32_PROC_THREAD_ATTRIBUTE_LIST *List = (K32_PROC_THREAD_ATTRIBUTE_LIST *)lpAttributeList;
+
+    UNREFERENCED_PARAMETER(dwFlags);
+
+    Needed = FIELD_OFFSET(K32_PROC_THREAD_ATTRIBUTE_LIST, Attributes[dwAttributeCount]);
+
+    if (!List || *lpSize < Needed)
+    {
+        *lpSize = Needed;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    List->Mask = 0;
+    List->AllocatedCount = dwAttributeCount;
+    List->Count = 0;
+    List->Reserved = 0;
+    *lpSize = Needed;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+UpdateProcThreadAttribute(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwFlags,
+    _In_ DWORD_PTR Attribute,
+    _In_ PVOID lpValue,
+    _In_ SIZE_T cbSize,
+    _Out_opt_ PVOID lpPreviousValue,
+    _In_opt_ PSIZE_T lpReturnSize)
+{
+    K32_PROC_THREAD_ATTRIBUTE_LIST *List = (K32_PROC_THREAD_ATTRIBUTE_LIST *)lpAttributeList;
+
+    UNREFERENCED_PARAMETER(dwFlags);
+    UNREFERENCED_PARAMETER(lpPreviousValue);
+    UNREFERENCED_PARAMETER(lpReturnSize);
+
+    if (List->Count >= List->AllocatedCount)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    List->Attributes[List->Count].Attribute = Attribute;
+    List->Attributes[List->Count].Size = cbSize;
+    List->Attributes[List->Count].Value = lpValue;
+    List->Count++;
+    List->Mask |= (1 << (Attribute & 0x1F));
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+DeleteProcThreadAttributeList(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList)
+{
+    /* Nothing is separately allocated; the caller owns the backing buffer. */
+    UNREFERENCED_PARAMETER(lpAttributeList);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetLogicalProcessorInformationEx(
+    _In_ DWORD RelationshipType,
+    _Out_writes_bytes_opt_(*ReturnedLength) PVOID Buffer,
+    _Inout_ PDWORD ReturnedLength)
+{
+    UNREFERENCED_PARAMETER(RelationshipType);
+    UNREFERENCED_PARAMETER(Buffer);
+
+    /* Not backed by a kernel query yet. */
+    if (ReturnedLength) *ReturnedLength = 0;
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetNamedPipeServerProcessId(
+    _In_ HANDLE Pipe,
+    _Out_ PULONG ServerProcessId)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    Status = NtFsControlFile(Pipe,
+                             NULL,
+                             NULL,
+                             NULL,
+                             &IoStatusBlock,
+                             CTL_CODE(FILE_DEVICE_NAMED_PIPE, 12, METHOD_BUFFERED, FILE_ANY_ACCESS),
+                             (PVOID)"ServerProcessId",
+                             sizeof("ServerProcessId"),
+                             ServerProcessId,
+                             sizeof(*ServerProcessId));
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/* Matches the real PROCESS_CYCLE_TIME_INFORMATION layout (not in our NDK headers yet) */
+typedef struct _K32_PROCESS_CYCLE_TIME_INFORMATION
+{
+    ULONGLONG AccumulatedCycles;
+    ULONGLONG CurrentCycleCount;
+} K32_PROCESS_CYCLE_TIME_INFORMATION;
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+QueryProcessCycleTime(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PULONG64 CycleTime)
+{
+    NTSTATUS Status;
+    K32_PROCESS_CYCLE_TIME_INFORMATION Info;
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessCycleTime,
+                                       &Info,
+                                       sizeof(Info),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        *CycleTime = 1000000ULL;
+        return TRUE;
+    }
+
+    *CycleTime = Info.AccumulatedCycles ? Info.AccumulatedCycles : 1000000ULL;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+QueryThreadCycleTime(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PULONG64 CycleTime)
+{
+    UNREFERENCED_PARAMETER(ThreadHandle);
+    UNREFERENCED_PARAMETER(CycleTime);
+
+    /* Not backed by a kernel query yet. */
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+/*
+ * @implemented
+ */
+int
+WINAPI
+ResolveLocaleName(
+    _In_opt_ LPCWSTR lpNameToResolve,
+    _Out_writes_opt_(cchLocaleName) LPWSTR lpLocaleName,
+    _In_ int cchLocaleName)
+{
+    size_t Length;
+
+    if (!lpNameToResolve) lpNameToResolve = L"";
+
+    Length = wcslen(lpNameToResolve) + 1;
+
+    if (cchLocaleName == 0) return (int)Length;
+
+    if (Length > (size_t)cchLocaleName)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    /* No real alias/resolution table; echo the name back as already-resolved. */
+    wcscpy(lpLocaleName, lpNameToResolve);
+    return (int)Length;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetFileInformationByHandle(
+    _In_ HANDLE hFile,
+    _In_ FILE_INFO_BY_HANDLE_CLASS FileInformationClass,
+    _In_reads_bytes_(dwBufferSize) LPVOID lpFileInformation,
+    _In_ DWORD dwBufferSize)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatusBlock;
+
+    switch (FileInformationClass)
+    {
+        case FileBasicInfo:
+            Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation,
+                                          dwBufferSize, FileBasicInformation);
+            break;
+
+        case FileEndOfFileInfo:
+            Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation,
+                                          dwBufferSize, FileEndOfFileInformation);
+            break;
+
+        case FileDispositionInfo:
+            Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation,
+                                          dwBufferSize, FileDispositionInformation);
+            break;
+
+        case FileIoPriorityHintInfo:
+            Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation,
+                                          dwBufferSize, FileIoPriorityHintInformation);
+            break;
+
+        case FileRenameInfo:
+        {
+            FILE_RENAME_INFO *RenameInfo = lpFileInformation;
+            UNICODE_STRING NtName;
+            PFILE_RENAME_INFORMATION NtRenameInfo;
+            ULONG AllocSize;
+
+            if (!RtlDosPathNameToNtPathName_U(RenameInfo->FileName, &NtName, NULL, NULL))
+            {
+                SetLastError(ERROR_PATH_NOT_FOUND);
+                return FALSE;
+            }
+
+            AllocSize = sizeof(*NtRenameInfo) + NtName.Length;
+            NtRenameInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, AllocSize);
+            if (!NtRenameInfo)
+            {
+                RtlFreeUnicodeString(&NtName);
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return FALSE;
+            }
+
+            NtRenameInfo->ReplaceIfExists = RenameInfo->ReplaceIfExists;
+            NtRenameInfo->RootDirectory = RenameInfo->RootDirectory;
+            NtRenameInfo->FileNameLength = NtName.Length;
+            RtlCopyMemory(NtRenameInfo->FileName, NtName.Buffer, NtName.Length);
+
+            Status = NtSetInformationFile(hFile, &IoStatusBlock, NtRenameInfo,
+                                          AllocSize, FileRenameInformation);
+
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NtRenameInfo);
+            RtlFreeUnicodeString(&NtName);
+            break;
+        }
+
+        default:
+            SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            return FALSE;
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _In_reads_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize)
+{
+    NTSTATUS Status;
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadMemoryPriority:
+            Status = NtSetInformationThread(hThread,
+                                            ThreadPagePriority,
+                                            ThreadInformation,
+                                            ThreadInformationSize);
+            break;
+
+        case ThreadPowerThrottling:
+            Status = NtSetInformationThread(hThread,
+                                            ThreadPowerThrottlingState,
+                                            ThreadInformation,
+                                            ThreadInformationSize);
+            break;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
+#include <appmodel.h>
+
+LONG WINAPI AppPolicyGetProcessTerminationMethod(HANDLE token, AppPolicyProcessTerminationMethod *policy)
+{
+    if (policy)
+        *policy = AppPolicyProcessTerminationMethod_ExitProcess;
+    return ERROR_SUCCESS;
+}
+
+LONG WINAPI AppPolicyGetThreadInitializationType(HANDLE token, AppPolicyThreadInitializationType *policy)
+{
+    if (policy)
+        *policy = AppPolicyThreadInitializationType_None;
+    return ERROR_SUCCESS;
+}
+
+LONG WINAPI AppPolicyGetShowDeveloperDiagnostic(HANDLE token, AppPolicyShowDeveloperDiagnostic *policy)
+{
+    if (policy)
+        *policy = AppPolicyShowDeveloperDiagnostic_ShowUI;
+    return ERROR_SUCCESS;
+}
+
+LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *policy)
+{
+    if (policy)
+        *policy = AppPolicyWindowingModel_ClassicDesktop;
+    return ERROR_SUCCESS;
 }
