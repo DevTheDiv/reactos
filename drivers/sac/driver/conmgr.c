@@ -280,6 +280,8 @@ ConMgrDisplayFastChannelSwitchingInterface(IN PSAC_CHANNEL Channel)
     NTSTATUS Status;
     PWCHAR Name;
     WCHAR Message[SAC_CHANNEL_NAME_SIZE + 32];
+    CHAR Utf8Message[sizeof(Message) * 3 / sizeof(WCHAR)];
+    ULONG Length, Utf8Count, ProcessedCount;
 
     /* Just announce the switch -- no overlay/menu UI implemented */
     Status = ChannelGetName(Channel, &Name);
@@ -288,8 +290,17 @@ ConMgrDisplayFastChannelSwitchingInterface(IN PSAC_CHANNEL Channel)
     _swprintf(Message, L"\r\n[Switched to channel: %s]\r\n", Name);
     SacFreePool(Name);
 
-    SacPutString(Message);
-    return STATUS_SUCCESS;
+    /* The selected channel has changed and its writes are disabled until the
+     * user acknowledges the banner. Writing through SacChannel would only
+     * buffer this notification on the now-background SAC screen. */
+    Length = wcslen(Message);
+    if (!SacTranslateUnicodeToUtf8(Message, Length, Utf8Message,
+                                  sizeof(Utf8Message), &Utf8Count,
+                                  &ProcessedCount) || ProcessedCount != Length)
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+    return ConMgrWriteData(Channel, Utf8Message, Utf8Count);
 }
 
 NTSTATUS
@@ -365,12 +376,19 @@ ConMgrChannelClose(IN PSAC_CHANNEL Channel)
 {
     NTSTATUS Status = STATUS_SUCCESS;
 
+    SacAssertMutexLockHeld();
+
     /* Check if we're in the right channel */
-    if (ConMgrIsWriteEnabled(Channel))
+    if (CurrentChannel == Channel)
     {
-        /* Yep, reset it */
-        Status = ConMgrResetCurrentChannel(FALSE);
-        ASSERT(NT_SUCCESS(Status));
+        /* Return directly to SAC, including when a switch banner was pending.
+         * Drop the selected-channel reference before its final owner goes. */
+        Status = ConMgrResetCurrentChannel(TRUE);
+        if (NT_SUCCESS(Status))
+        {
+            InputInEscape = FALSE;
+            InputInEscTab = FALSE;
+        }
     }
 
     /* All done */
@@ -914,8 +932,24 @@ NTSTATUS
 NTAPI
 ConMgrHandleEvent(IN ULONG EventCode,
                   IN PSAC_CHANNEL Channel,
-                  OUT PVOID Data)
+                  IN PVOID Data)
 {
-    ASSERT(FALSE);
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    CHECK_PARAMETER2(Channel);
+    CHECK_PARAMETER3(Data);
+
+    /* Channel closure is currently the only manager notification. */
+    if (EventCode != SAC_EVENT_CHANNEL_CLOSE) return STATUS_NOT_IMPLEMENTED;
+
+    Status = *(PNTSTATUS)Data;
+    if (!NT_SUCCESS(Status) && Status != STATUS_ALREADY_DISCONNECTED)
+        return Status;
+
+    /* Notifications can originate from file close, not just the serial worker.
+     * Serialize the selected channel and its reference with channel switching. */
+    SacAcquireMutexLock();
+    Status = ConMgrChannelClose(Channel);
+    SacReleaseMutexLock();
+    return Status;
 }

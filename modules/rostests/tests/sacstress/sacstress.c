@@ -13,8 +13,73 @@ static HANDLE OpenSac(void)
                        FILE_FLAG_OVERLAPPED, NULL);
 }
 
+static HANDLE OpenChannel(const WCHAR *Name)
+{
+    SAC_IOCTL_CHANNEL_CREATE Request = {0};
+    DWORD Bytes;
+    HANDLE Device = CreateFileW(L"\\\\.\\SAC", GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    if (Device == INVALID_HANDLE_VALUE) return Device;
+    wcscpy(Request.NameBuffer, Name);
+    if (!DeviceIoControl(Device, IOCTL_SAC_CHANNEL_CREATE, &Request,
+                          sizeof(Request), NULL, 0, &Bytes, NULL))
+    {
+        DWORD Error = GetLastError();
+        CloseHandle(Device);
+        SetLastError(Error);
+        return INVALID_HANDLE_VALUE;
+    }
+    return Device;
+}
+
+static int ChannelCycles(unsigned long Iterations)
+{
+    HANDLE First, Second, Duplicate;
+    DWORD i, Error;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    for (i = 0; i < Iterations; ++i)
+    {
+        First = OpenChannel(L"SACCLOSE_A");
+        if (First == INVALID_HANDLE_VALUE)
+        {
+            printf("FAIL: recreate A at %lu error=%lu\n", i, GetLastError());
+            return 1;
+        }
+        Second = OpenChannel(L"SACCLOSE_B");
+        if (Second == INVALID_HANDLE_VALUE)
+        {
+            printf("FAIL: recreate B at %lu error=%lu\n", i, GetLastError());
+            CloseHandle(First);
+            return 1;
+        }
+        Duplicate = OpenChannel(L"SACCLOSE_A");
+        Error = GetLastError();
+        if (Duplicate != INVALID_HANDLE_VALUE || Error != ERROR_DUP_NAME)
+        {
+            printf("FAIL: live duplicate accepted or wrong error=%lu\n", Error);
+            if (Duplicate != INVALID_HANDLE_VALUE) CloseHandle(Duplicate);
+            CloseHandle(First);
+            CloseHandle(Second);
+            return 1;
+        }
+
+        /* Leave a hole before B. Cleanup must scan past the empty A slot.
+         * Reusing both names next cycle also forces retired-slot reaping. */
+        if (!CloseHandle(First) || !CloseHandle(Second)) return 1;
+        if ((i + 1) % 100 == 0) printf("channel progress %lu/%lu\n", i + 1, Iterations);
+    }
+    First = OpenChannel(L"SACCLOSE_B");
+    if (First == INVALID_HANDLE_VALUE) return 1;
+    CloseHandle(First);
+    printf("PASS: %lu channel pairs; close, sparse slots, duplicate rejection, name reuse\n",
+           Iterations);
+    return 0;
+}
+
 /* A real user of the public channel API for the serial round-trip test. */
-static int EchoServer(unsigned long Target)
+static int EchoServer(unsigned long Target, DWORD Timeout)
 {
     SAC_IOCTL_CHANNEL_CREATE Request = {0};
     BYTE Buffer[256];
@@ -34,7 +99,7 @@ static int EchoServer(unsigned long Target)
         return 1;
     }
     puts("READY: switch to SACSTRESS and acknowledge the channel banner");
-    while (Total < Target && GetTickCount() - Started < 120000)
+    while ((!Target || Total < Target) && GetTickCount() - Started < Timeout)
     {
         /* Vary read sizes to exercise partial reads while serial input arrives. */
         DWORD Size = 1 + (Total % sizeof(Buffer));
@@ -173,7 +238,11 @@ int main(int argc, char **argv)
 
     if (argc > 2 && !strcmp(argv[1], "--worker")) return Worker(strtoul(argv[2], NULL, 10));
     if (argc > 2 && !strcmp(argv[1], "--echo-server"))
-        return EchoServer(strtoul(argv[2], NULL, 10));
+        return EchoServer(strtoul(argv[2], NULL, 10), 120000);
+    if (argc > 2 && !strcmp(argv[1], "--banner-close"))
+        return EchoServer(0, strtoul(argv[2], NULL, 10));
+    if (argc > 2 && !strcmp(argv[1], "--channels"))
+        return ChannelCycles(strtoul(argv[2], NULL, 10));
     if (!Iterations || Iterations > 100000 || !Timeout) return 1;
     GetModuleFileNameA(NULL, Path, sizeof(Path));
     sprintf(Command, "\"%s\" --worker %lu", Path, Iterations);

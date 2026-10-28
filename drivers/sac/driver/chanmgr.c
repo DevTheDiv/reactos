@@ -302,8 +302,27 @@ NTSTATUS
 NTAPI
 ChanMgrReapChannel(IN ULONG ChannelIndex)
 {
-    /* FIXME: TODO */
-    return STATUS_NOT_IMPLEMENTED;
+    PSAC_CHANNEL Channel;
+    NTSTATUS Status;
+
+    CHECK_PARAMETER1(ChannelIndex < SAC_MAX_CHANNELS);
+
+    /* ChanMgrReapChannels holds this slot lock; creation is also serialized.
+     * Zero references means neither an owner nor the selected-channel state
+     * can still use this retired channel. */
+    ASSERT(ChannelSlotLock[ChannelIndex].RefCount == 1);
+    ASSERT(ChannelGetReferenceCount(ChannelIndex) == 0);
+    Channel = ChannelFromIndex(ChannelIndex);
+    ASSERT(Channel != NULL);
+    ASSERT(!ChannelIsActive(Channel));
+
+    Status = Channel->ChannelDestroy(Channel);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    InterlockedExchangePointer((PVOID *)&ChannelArray[ChannelIndex], NULL);
+    SacFreePool(Channel);
+    InterlockedExchange(&ChannelReaped[ChannelIndex], TRUE);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -599,7 +618,7 @@ NTSTATUS
 NTAPI
 ChanMgrCloseChannel(IN PSAC_CHANNEL Channel)
 {
-    NTSTATUS Status;
+    NTSTATUS Status, EventStatus;
     CHECK_PARAMETER(Channel);
 
     /* Check if the channel is active */
@@ -615,7 +634,8 @@ ChanMgrCloseChannel(IN PSAC_CHANNEL Channel)
     }
 
     /* Handle the channel close */
-    ConMgrHandleEvent(TRUE, Channel, &Status);
+    EventStatus = ConMgrHandleEvent(SAC_EVENT_CHANNEL_CLOSE, Channel, &Status);
+    if (NT_SUCCESS(Status)) Status = EventStatus;
     return Status;
 }
 
@@ -698,6 +718,7 @@ ChanMgrCloseChannelsWithFileObject(IN PFILE_OBJECT FileObject)
     {
         /* Try to get this one */
         Status = ChanMgrGetByIndex(i, &Channel);
+        if (Status == STATUS_NOT_FOUND) continue;
         if (!NT_SUCCESS(Status)) break;
 
         /* Check if the FO matches, if so, close the channel */
@@ -709,7 +730,7 @@ ChanMgrCloseChannelsWithFileObject(IN PFILE_OBJECT FileObject)
     }
 
     /* All done */
-    return Status;
+    return (Status == STATUS_NOT_FOUND) ? STATUS_SUCCESS : Status;
 }
 
 NTSTATUS

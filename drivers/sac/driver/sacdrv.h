@@ -740,12 +740,14 @@ ConMgrIsWriteEnabled(
     IN PSAC_CHANNEL Channel
 );
 
+#define SAC_EVENT_CHANNEL_CLOSE 1
+
 NTSTATUS
 NTAPI
 ConMgrHandleEvent(
     IN ULONG EventCode,
     IN PSAC_CHANNEL Channel,
-    OUT PVOID Data
+    IN PVOID Data
 );
 
 //

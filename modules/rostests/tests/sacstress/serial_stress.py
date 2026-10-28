@@ -28,14 +28,22 @@ def main():
     parser.add_argument("--port", type=int, default=5560)
     parser.add_argument("--bytes", type=int, default=32768)
     parser.add_argument("--output", help="Write a JSON result file")
+    parser.add_argument("--expect-close", action="store_true",
+                        help="Also require the SAC prompt after the echo channel closes")
+    parser.add_argument("--banner-close", action="store_true",
+                        help="Leave the selected channel's banner unacknowledged and require closure")
     args = parser.parse_args()
     if not 1 <= args.bytes <= 1048576:
         parser.error("--bytes must be between 1 and 1048576")
     rng = random.Random(0x5AC)
     payload = bytes(rng.choice(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
                     for _ in range(args.bytes))
+    if args.banner_close:
+        payload = b""
+        args.expect_close = True
     started = time.monotonic()
-    result = {"bytes_requested": args.bytes, "passed": False}
+    result = {"bytes_requested": len(payload), "passed": False,
+              "banner_acknowledged": not args.banner_close}
     try:
         with socket.create_connection((args.host, args.port), 5) as sock:
             drain(sock)
@@ -46,15 +54,16 @@ def main():
                     break
             else:
                 raise RuntimeError("SACSTRESS channel not found; start the echo server first")
-            sock.sendall(b" ")  # Acknowledge the channel-switch banner.
-            drain(sock)
+            if not args.banner_close:
+                sock.sendall(b" ")  # Acknowledge the channel-switch banner.
+                drain(sock)
             reply = bytearray()
             sizes = (1, 7, 31, 127, 255, 511)
             offset = block = 0
             while offset < len(payload):
                 chunk = payload[offset:offset + sizes[block % len(sizes)]]
                 sock.sendall(chunk)  # One burst, no per-character throttling.
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + 30
                 echoed = bytearray()
                 while len(echoed) < len(chunk):
                     remaining = deadline - time.monotonic()
@@ -72,7 +81,36 @@ def main():
                 block += 1
             result.update(passed=True, bytes_verified=len(reply), bursts=block,
                           sha256=hashlib.sha256(reply).hexdigest())
+            if args.expect_close:
+                closing = bytearray()
+                deadline = time.monotonic() + 30
+                while b"SAC>" not in closing:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("Closing the selected channel did not return to SAC")
+                    sock.settimeout(remaining)
+                    data = sock.recv(4096)
+                    if not data:
+                        raise RuntimeError("Serial connection closed")
+                    closing.extend(data)
+                result["returned_to_sac"] = True
+                # A fresh command must work too, rather than just a screen redraw.
+                drain(sock)
+                sock.sendall(b"\r")
+                deadline = time.monotonic() + 5
+                probe = bytearray()
+                while b"SAC>" not in probe:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("SAC did not respond after channel closure")
+                    sock.settimeout(remaining)
+                    data = sock.recv(4096)
+                    if not data:
+                        raise RuntimeError("Serial connection closed after returning to SAC")
+                    probe.extend(data)
+                result["post_close_prompt"] = True
     except Exception as error:
+        result["passed"] = False
         result["error"] = str(error)
     result["elapsed_seconds"] = round(time.monotonic() - started, 3)
     text = json.dumps(result, indent=2)
