@@ -777,6 +777,39 @@ static void test_stream_size(void)
     DeleteFileA(filename);
 }
 
+static void test_GetDpiForMonitor(HMODULE module)
+{
+    HRESULT (WINAPI *get_dpi)(HMONITOR, int, UINT *, UINT *);
+    POINT point = {0, 0};
+    HMONITOR monitor;
+    UINT x = 0, y = 0;
+    HRESULT hr;
+
+    get_dpi = (void *)GetProcAddress(module, "GetDpiForMonitor");
+    if (!get_dpi)
+    {
+        win_skip("GetDpiForMonitor is not available.\n");
+        return;
+    }
+    monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+    if (!monitor)
+    {
+        win_skip("No primary monitor is available.\n");
+        return;
+    }
+
+    hr = get_dpi(monitor, 0, &x, &y);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(x && y, "Successful DPI query returned %u x %u.\n", x, y);
+
+    hr = get_dpi(monitor, 0, NULL, &y);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx for NULL x.\n", hr);
+    hr = get_dpi(monitor, 0, &x, NULL);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx for NULL y.\n", hr);
+    hr = get_dpi(monitor, 3, &x, &y);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx for invalid DPI type.\n", hr);
+}
+
 START_TEST(shcore)
 {
     HMODULE hshcore = LoadLibraryA("shcore.dll");
@@ -789,6 +822,7 @@ START_TEST(shcore)
 
     init(hshcore);
 
+    test_GetDpiForMonitor(hshcore);
     test_process_reference();
     test_SHUnicodeToAnsi();
     test_SHAnsiToUnicode();

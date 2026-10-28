@@ -78,6 +78,35 @@ HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x
     if (GetDpiForMonitorInternal( monitor, type, x, y )) return S_OK;
     return HRESULT_FROM_WIN32( GetLastError() );
 }
+#else
+HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x, UINT *y)
+{
+    MONITORINFO info;
+    HDC dc;
+    int dpi_x, dpi_y;
+
+    if (!x || !y || type < MDT_EFFECTIVE_DPI || type > MDT_RAW_DPI)
+        return E_INVALIDARG;
+
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info))
+        return E_INVALIDARG;
+
+    /* ReactOS currently uses one system DPI for all monitors. Return real
+     * screen DC values instead of successful, uninitialized DPI outputs. */
+    if (!(dc = GetDC(NULL)))
+        return E_FAIL;
+    dpi_x = GetDeviceCaps(dc, LOGPIXELSX);
+    dpi_y = GetDeviceCaps(dc, LOGPIXELSY);
+    ReleaseDC(NULL, dc);
+
+    if (dpi_x <= 0 || dpi_y <= 0)
+        return E_FAIL;
+
+    *x = dpi_x;
+    *y = dpi_y;
+    return S_OK;
+}
 #endif /* __REACTOS__ */
 
 HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)
