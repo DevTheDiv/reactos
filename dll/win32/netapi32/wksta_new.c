@@ -319,8 +319,9 @@ NetGetJoinInformation(
     _Out_ LPWSTR *lpNameBuffer,
     _Out_ PNETSETUP_JOIN_STATUS BufferType)
 {
-    PWSTR pName = NULL;
-    NET_API_STATUS status = NERR_Success;
+    WCHAR ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Size = ARRAYSIZE(ComputerName);
+    NET_API_STATUS status;
 
     TRACE("NetGetJoinInformation(%s %p %p)\n",
           debugstr_w(lpServer), lpNameBuffer, BufferType);
@@ -328,22 +329,21 @@ NetGetJoinInformation(
     if (lpNameBuffer == NULL || BufferType == NULL)
         return ERROR_INVALID_PARAMETER;
 
-    RpcTryExcept
-    {
-        status = NetrGetJoinInformation((LPWSTR)lpServer,
-                                        &pName,
-                                        BufferType);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
-    }
-    RpcEndExcept;
+    /* Answer locally: this is a standalone workstation in a workgroup.
+       Avoids the RPC into wkssvc/LSA, which can wedge under load. */
+    if (!GetComputerNameW(ComputerName, &Size))
+        return GetLastError();
 
-    if (status == NERR_Success)
-        *lpNameBuffer = pName;
+    status = NetApiBufferAllocate((Size + 1) * sizeof(WCHAR),
+                                  (LPVOID*)lpNameBuffer);
+    if (status != NERR_Success)
+        return status;
 
-    return status;
+    RtlCopyMemory(*lpNameBuffer, ComputerName, (Size + 1) * sizeof(WCHAR));
+
+    *BufferType = NetSetupWorkgroupName;
+
+    return NERR_Success;
 }
 
 

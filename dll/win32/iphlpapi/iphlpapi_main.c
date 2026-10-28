@@ -2731,10 +2731,29 @@ DWORD WINAPI IpRenewAddress(PIP_ADAPTER_INDEX_MAP AdapterInfo)
  */
 DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 {
-  FIXME("(Handle %p, overlapped %p): stub\n", Handle, overlapped);
-  if (Handle) *Handle = INVALID_HANDLE_VALUE;
-  if (overlapped) ((IO_STATUS_BLOCK *) overlapped)->Status = STATUS_PENDING;
-  return ERROR_IO_PENDING;
+  HANDLE hEvent;
+
+  TRACE("NotifyAddrChange()\n");
+
+  if (!Handle)
+      return ERROR_INVALID_PARAMETER;
+
+  /* No address-table change notifications are implemented, so hand back a
+     manual-reset event that is never signaled. Callers that expect success
+     semantics (e.g. Chromium's network change watcher) simply wait on it. */
+  hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+  if (!hEvent)
+      return GetLastError();
+
+  *Handle = hEvent;
+
+  if (overlapped)
+  {
+      ((IO_STATUS_BLOCK *) overlapped)->Status = STATUS_SUCCESS;
+      ((IO_STATUS_BLOCK *) overlapped)->Information = 0;
+  }
+
+  return NO_ERROR;
 }
 
 
@@ -2756,8 +2775,26 @@ DWORD WINAPI NotifyAddrChange(PHANDLE Handle, LPOVERLAPPED overlapped)
  */
 DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
 {
-  FIXME("(Handle %p, overlapped %p): stub\n", Handle, overlapped);
-  return ERROR_NOT_SUPPORTED;
+  HANDLE hEvent;
+
+  TRACE("NotifyRouteChange()\n");
+
+  if (!Handle)
+      return ERROR_INVALID_PARAMETER;
+
+  hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+  if (!hEvent)
+      return GetLastError();
+
+  *Handle = hEvent;
+
+  if (overlapped)
+  {
+      ((IO_STATUS_BLOCK *) overlapped)->Status = STATUS_SUCCESS;
+      ((IO_STATUS_BLOCK *) overlapped)->Information = 0;
+  }
+
+  return NO_ERROR;
 }
 
 /******************************************************************

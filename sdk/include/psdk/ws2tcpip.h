@@ -335,6 +335,18 @@ WSAAPI
 FreeAddrInfoExW(
   _In_opt_ PADDRINFOEXW pAddrInfoEx);
 
+WINSOCK_API_LINKAGE
+INT
+WSAAPI
+GetAddrInfoExCancel(
+  _In_ LPHANDLE lpHandle);
+
+WINSOCK_API_LINKAGE
+INT
+WSAAPI
+GetAddrInfoExOverlappedResult(
+  _In_ LPOVERLAPPED lpOverlapped);
+
 #define FreeAddrInfoExA FreeAddrInfoEx
 
 #ifdef UNICODE

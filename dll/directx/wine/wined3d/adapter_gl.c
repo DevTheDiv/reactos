@@ -5003,28 +5003,16 @@ static float wined3d_adapter_find_fill_offset(struct wined3d_caps_gl_ctx *ctx)
 }
 
 #ifdef __REACTOS__
-static DWORD WINAPI wined3d_no_3d_warning_proc(void *param)
-{
-    MessageBoxW(NULL,
-            L"ReactOS DirectX Needs at least OpenGL 2.0 or better\n\n"
-            L"Install a display driver that provides an OpenGL ICD to enable 3D "
-            L"acceleration. Or install Mesa3D from RAPPS",
-            L"ReactOS - no 3D acceleration",
-            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
-    return 0;
-}
-
 static void wined3d_warn_no_3d(void)
 {
     static LONG warned;
-    HANDLE thread;
 
     /* Only warn once per process */
     if (InterlockedCompareExchange(&warned, 1, 0))
         return;
 
-    if ((thread = CreateThread(NULL, 0, wined3d_no_3d_warning_proc, NULL, 0, NULL)))
-        CloseHandle(thread);
+    /* Chrome/RAPPS: fail silently - no interactive MessageBox */
+    ERR("No 3D acceleration available (OpenGL 2.0 ICD not present)\n");
 }
 #endif /* __REACTOS__ */
 

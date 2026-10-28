@@ -134,7 +134,8 @@ NetpGetJoinInformation(
             goto done;
         }
 
-        wcscpy(Name, PrimaryDomainInfo->Name.Buffer);
+        memcpy(Name, PrimaryDomainInfo->Name.Buffer, PrimaryDomainInfo->Name.Length);
+        Name[PrimaryDomainInfo->Name.Length / sizeof(WCHAR)] = L'\0';
     }
 
 done:

@@ -1983,3 +1983,29 @@ RPC_STATUS WINAPI I_RpcBindingInqLocalClientPID(RPC_BINDING_HANDLE ClientBinding
 
     return connection->ops->inquire_client_pid(connection, ClientPID);
 }
+
+/***********************************************************************
+ *             I_RpcOpenClientProcess (RPCRT4.@)
+ */
+RPC_STATUS WINAPI I_RpcOpenClientProcess(RPC_BINDING_HANDLE ClientBinding, ULONG DesiredAccess, HANDLE *ClientProcess)
+{
+    ULONG ClientPID;
+    RPC_STATUS status;
+
+    TRACE("(%p, 0x%lx, %p)\n", ClientBinding, DesiredAccess, ClientProcess);
+
+    if (!ClientProcess)
+        return RPC_S_INVALID_ARG;
+
+    *ClientProcess = NULL;
+
+    status = I_RpcBindingInqLocalClientPID(ClientBinding, &ClientPID);
+    if (status != RPC_S_OK)
+        return status;
+
+    *ClientProcess = OpenProcess(DesiredAccess, FALSE, ClientPID);
+    if (!*ClientProcess)
+        return RPC_S_ACCESS_DENIED;
+
+    return RPC_S_OK;
+}

@@ -1161,6 +1161,36 @@ AddAce(PACL pAcl,
 }
 
 /******************************************************************************
+ * AddConditionalAce [ADVAPI32.@]
+ */
+BOOL WINAPI AddConditionalAce(PACL pAcl, DWORD dwAceRevision, DWORD AceFlags,
+                              UCHAR AceType, ACCESS_MASK AccessMask, PSID pSid,
+                              PCWSTR ConditionStr, PULONG ReturnLength)
+{
+    FIXME("(%p, %lu, 0x%lx, %u, 0x%lx, %p, %s, %p): stub\n",
+          pAcl, dwAceRevision, AceFlags, AceType, AccessMask, pSid, wine_dbgstr_w(ConditionStr), ReturnLength);
+
+    if (ReturnLength)
+        *ReturnLength = 0;
+
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+/******************************************************************************
+ * AddMandatoryAce [ADVAPI32.@]
+ */
+BOOL WINAPI AddMandatoryAce(PACL pAcl, DWORD dwAceRevision, DWORD AceFlags,
+                            DWORD MandatoryPolicy, PSID pLabelSid)
+{
+    FIXME("(%p, 0x%lx, 0x%lx, 0x%lx, %p): stub\n",
+          pAcl, dwAceRevision, AceFlags, MandatoryPolicy, pLabelSid);
+
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+/******************************************************************************
  * DeleteAce [ADVAPI32.@]
  */
 BOOL WINAPI DeleteAce(PACL pAcl, DWORD dwAceIndex)

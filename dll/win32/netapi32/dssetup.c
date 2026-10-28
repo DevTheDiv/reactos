@@ -13,69 +13,11 @@
 #include <rpc.h>
 #include "dssetup_c.h"
 
+#define DSROLE_PRIMARY_DS_MIXED_MODE        0x00000002
+
 WINE_DEFAULT_DEBUG_CHANNEL(netapi32);
 
 /* FUNCTIONS *****************************************************************/
-
-static
-RPC_STATUS
-DsSetupBind(
-    LPWSTR lpServerName,
-    handle_t *hBinding)
-{
-    LPWSTR pszStringBinding;
-    RPC_STATUS status;
-
-    TRACE("DsSetupBind() called\n");
-
-    *hBinding = NULL;
-
-    status = RpcStringBindingComposeW(NULL,
-                                      L"ncacn_np",
-                                      lpServerName,
-                                      L"\\pipe\\lsarpc",
-                                      NULL,
-                                      &pszStringBinding);
-    if (status)
-    {
-        TRACE("RpcStringBindingCompose returned 0x%x\n", status);
-        return status;
-    }
-
-    /* Set the binding handle that will be used to bind to the server. */
-    status = RpcBindingFromStringBindingW(pszStringBinding,
-                                          hBinding);
-    if (status)
-    {
-        TRACE("RpcBindingFromStringBinding returned 0x%x\n", status);
-    }
-
-    status = RpcStringFreeW(&pszStringBinding);
-    if (status)
-    {
-        TRACE("RpcStringFree returned 0x%x\n", status);
-    }
-
-    return status;
-}
-
-
-static
-void
-DsSetupUnbind(
-    handle_t hBinding)
-{
-    RPC_STATUS status;
-
-    TRACE("DsSetupUnbind()\n");
-
-    status = RpcBindingFree(&hBinding);
-    if (status)
-    {
-        TRACE("RpcBindingFree returned 0x%x\n", status);
-    }
-}
-
 
 VOID
 WINAPI
@@ -94,7 +36,6 @@ DsRoleGetPrimaryDomainInformation(
     DSROLE_PRIMARY_DOMAIN_INFO_LEVEL InfoLevel,
     PBYTE* Buffer)
 {
-    handle_t hBinding = NULL;
     NET_API_STATUS status;
 
     TRACE("DsRoleGetPrimaryDomainInformation(%p, %d, %p)\n",
@@ -110,29 +51,29 @@ DsRoleGetPrimaryDomainInformation(
 
     *Buffer = NULL;
 
-    status = DsSetupBind((LPWSTR)lpServer, &hBinding);
-    if (status)
+    /* Answer locally: this is a standalone workstation in a workgroup.
+       Avoids the RPC into the dssetup service, which can wedge under load. */
+    if (InfoLevel == DsRolePrimaryDomainInfoBasic)
     {
-        TRACE("DsSetupBind() failed (Status %lu\n)\n", status);
-        return status;
+        PDSROLER_PRIMARY_DOMAIN_INFO_BASIC BasicInfo;
+
+        status = NetApiBufferAllocate(sizeof(DSROLER_PRIMARY_DOMAIN_INFO_BASIC),
+                                      (LPVOID*)&BasicInfo);
+        if (status != NERR_Success)
+            return status;
+
+        RtlZeroMemory(BasicInfo, sizeof(DSROLER_PRIMARY_DOMAIN_INFO_BASIC));
+        BasicInfo->MachineRole = DsRole_RoleStandaloneWorkstation;
+        BasicInfo->Flags = DSROLE_PRIMARY_DS_MIXED_MODE;
+        BasicInfo->DomainNameFlat = NULL;
+        BasicInfo->DomainNameDns = NULL;
+        BasicInfo->DomainForestName = NULL;
+
+        *Buffer = (PBYTE)BasicInfo;
+        return NERR_Success;
     }
 
-    RpcTryExcept
-    {
-        status = DsRolerGetPrimaryDomainInformation(hBinding,
-                                                    InfoLevel,
-                                                    (PDSROLER_PRIMARY_DOMAIN_INFORMATION *)Buffer);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
-    }
-    RpcEndExcept;
-
-    if (hBinding != NULL)
-        DsSetupUnbind(hBinding);
-
-    return status;
+    return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
 /* EOF */

@@ -590,6 +590,7 @@
 @ stdcall RegisterMessagePumpHook(ptr)
 @ stdcall -version=0x602+ RegisterPointerDeviceNotifications(long long)
 @ stdcall -version=0x600+ RegisterPowerSettingNotification(long ptr long)
+@ stdcall -version=0x602+ RegisterSuspendResumeNotification(ptr long)
 @ stdcall -import RegisterRawInputDevices(ptr long long) NtUserRegisterRawInputDevices
 @ stdcall RegisterServicesProcess(long)
 @ stdcall RegisterShellHookWindow(long)

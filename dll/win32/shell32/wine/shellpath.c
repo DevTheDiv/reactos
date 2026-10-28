@@ -3397,3 +3397,100 @@ HRESULT WINAPI SHGetSpecialFolderLocation(
     hr = SHGetFolderLocation(hwndOwner, nFolder, NULL, 0, ppidl);
     return hr;
 }
+
+static int csidl_from_id( const KNOWNFOLDERID *id )
+{
+    UINT i;
+    for (i = 0; i < _countof(CSIDL_Data); i++)
+    {
+        if (CSIDL_Data[i].id && IsEqualGUID( CSIDL_Data[i].id, id ))
+            return i;
+    }
+    return -1;
+}
+
+/*************************************************************************
+ * SHGetKnownFolderPath           [SHELL32.@]
+ */
+HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE token, WCHAR **ret_path)
+{
+    WCHAR pathW[MAX_PATH];
+    HRESULT hr;
+    int folder, shgfp_flags;
+
+    TRACE("%s, 0x%08x, %p, %p\n", wine_dbgstr_guid(rfid), flags, token, ret_path);
+
+    if (!ret_path)
+        return E_INVALIDARG;
+
+    *ret_path = NULL;
+
+    folder = csidl_from_id(rfid);
+    if (folder < 0)
+        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+
+    if (flags & ~(KF_FLAG_CREATE|KF_FLAG_SIMPLE_IDLIST|KF_FLAG_DONT_UNEXPAND|
+        KF_FLAG_DONT_VERIFY|KF_FLAG_NO_ALIAS|KF_FLAG_INIT|KF_FLAG_DEFAULT_PATH|KF_FLAG_NOT_PARENT_RELATIVE))
+    {
+        FIXME("flags 0x%08x not supported\n", flags);
+        return E_INVALIDARG;
+    }
+
+    if ((flags & (KF_FLAG_DEFAULT_PATH | KF_FLAG_NOT_PARENT_RELATIVE)) == KF_FLAG_NOT_PARENT_RELATIVE)
+    {
+        WARN("Invalid flags mask %#x.\n", flags);
+        return E_INVALIDARG;
+    }
+
+    if (flags & KF_FLAG_NOT_PARENT_RELATIVE)
+    {
+        FIXME("Ignoring KF_FLAG_NOT_PARENT_RELATIVE.\n");
+        flags &= ~KF_FLAG_NOT_PARENT_RELATIVE;
+    }
+
+    folder |= flags & CSIDL_FLAG_MASK;
+    shgfp_flags = (flags & KF_FLAG_DEFAULT_PATH) ? SHGFP_TYPE_DEFAULT : SHGFP_TYPE_CURRENT;
+
+    hr = SHGetFolderPathAndSubDirW( 0, folder, token, shgfp_flags, NULL, pathW );
+    if (FAILED( hr ))
+    {
+        TRACE("Failed to get folder path, %#x.\n", hr);
+        return hr;
+    }
+
+    TRACE("Final path is %s, %#x\n", debugstr_w(pathW), hr);
+
+    *ret_path = CoTaskMemAlloc((lstrlenW(pathW) + 1) * sizeof(WCHAR));
+    if (!*ret_path)
+        return E_OUTOFMEMORY;
+    lstrcpyW(*ret_path, pathW);
+
+    return hr;
+}
+
+/*************************************************************************
+ * SHGetFolderPathEx           [SHELL32.@]
+ */
+HRESULT WINAPI SHGetFolderPathEx(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE token, LPWSTR path, UINT len)
+{
+    HRESULT hr;
+    WCHAR *buffer;
+
+    TRACE("%s, 0x%08x, %p, %p, %u\n", wine_dbgstr_guid(rfid), flags, token, path, len);
+
+    if (!path || !len) return E_INVALIDARG;
+
+    hr = SHGetKnownFolderPath( rfid, flags, token, &buffer );
+    if (SUCCEEDED( hr ))
+    {
+        if ((DWORD)lstrlenW( buffer ) + 1 > len)
+        {
+            CoTaskMemFree( buffer );
+            return HRESULT_FROM_WIN32( ERROR_INSUFFICIENT_BUFFER );
+        }
+        lstrcpyW( path, buffer );
+        CoTaskMemFree( buffer );
+    }
+
+    return hr;
+}

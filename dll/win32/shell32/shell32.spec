@@ -541,14 +541,14 @@
 @ stdcall SHGetFolderPathA(long long long long ptr) # 2k3:304, Vista:365
 @ stdcall SHGetFolderPathAndSubDirA(long long long long str ptr) # 2k3:305, Vista:366
 @ stdcall SHGetFolderPathAndSubDirW(long long long long wstr ptr) # 2k3:306, Vista:367
-@ stub -version=0x600+ SHGetFolderPathEx # Vista:368
+@ stdcall -version=0x600+ SHGetFolderPathEx(ptr long ptr ptr long) # Vista:368
 @ stdcall SHGetFolderPathW(long long long long ptr) # 2k3:307, Vista:369
 @ stdcall -version=0x600+ SHGetIDListFromObject(ptr ptr) # Vista:370
 @ stdcall SHGetIconOverlayIndexA(str long) # 2k3:308, Vista:371
 @ stdcall SHGetIconOverlayIndexW(wstr long) # 2k3:309, Vista:372
 @ stdcall SHGetInstanceExplorer(long) shcore.GetProcessReference # 2k3:310, Vista:373
 @ stub -version=0x600+ SHGetKnownFolderIDList # Vista:374
-@ stub -version=0x600+ SHGetKnownFolderPath # Vista:375
+@ stdcall -version=0x600+ SHGetKnownFolderPath(ptr long ptr ptr) # Vista:375
 @ stub -version=0x600+ SHGetLocalizedName # Vista:376
 @ stdcall SHGetMalloc(ptr) # 2k3:311, Vista:377
 @ stdcall -version=0x600+ SHGetNameFromIDList(ptr long ptr) # Vista:378
@@ -662,3 +662,6 @@
 
 @ stdcall -version=0x601+ GetCurrentProcessExplicitAppUserModelID(wstr)
 @ stdcall -version=0x601+ SetCurrentProcessExplicitAppUserModelID(wstr)
+@ stdcall -version=0x602+ SetProcessDpiAwareness(long) shcore.SetProcessDpiAwareness
+@ stdcall -version=0x602+ GetProcessDpiAwareness(long ptr) shcore.GetProcessDpiAwareness
+@ stdcall -version=0x602+ GetDpiForMonitor(long long ptr ptr) shcore.GetDpiForMonitor

@@ -8,6 +8,9 @@
 
 /* INCLUDES ******************************************************************/
 
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+
 #include <ws2_32.h>
 
 #include <ws2tcpip.h>
@@ -1082,4 +1085,308 @@ getnameinfo(const struct sockaddr FAR *sa,
 Quickie:
     SetLastError(ErrorCode);
     return ErrorCode;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WSAAPI
+FreeAddrInfoExW(IN PADDRINFOEXW pAddrInfoEx)
+{
+    PADDRINFOEXW NextInfo;
+
+    for (NextInfo = pAddrInfoEx; NextInfo; NextInfo = pAddrInfoEx)
+    {
+        if (NextInfo->ai_canonname)
+            HeapFree(WsSockHeap, 0, NextInfo->ai_canonname);
+        if (NextInfo->ai_addr)
+            HeapFree(WsSockHeap, 0, NextInfo->ai_addr);
+        if (NextInfo->ai_blob)
+            HeapFree(WsSockHeap, 0, NextInfo->ai_blob);
+        pAddrInfoEx = NextInfo->ai_next;
+        HeapFree(WsSockHeap, 0, NextInfo);
+    }
+}
+
+/*
+ * @implemented
+ */
+VOID
+WSAAPI
+FreeAddrInfoEx(IN PADDRINFOEXA pAddrInfoEx)
+{
+    PADDRINFOEXA NextInfo;
+
+    for (NextInfo = pAddrInfoEx; NextInfo; NextInfo = pAddrInfoEx)
+    {
+        if (NextInfo->ai_canonname)
+            HeapFree(WsSockHeap, 0, NextInfo->ai_canonname);
+        if (NextInfo->ai_addr)
+            HeapFree(WsSockHeap, 0, NextInfo->ai_addr);
+        if (NextInfo->ai_blob)
+            HeapFree(WsSockHeap, 0, NextInfo->ai_blob);
+        pAddrInfoEx = NextInfo->ai_next;
+        HeapFree(WsSockHeap, 0, NextInfo);
+    }
+}
+
+/*
+ * @implemented
+ */
+INT
+WSAAPI
+GetAddrInfoExW(IN PCWSTR pName OPTIONAL,
+               IN PCWSTR pServiceName OPTIONAL,
+               IN DWORD dwNameSpace,
+               IN LPGUID lpNspId OPTIONAL,
+               IN const ADDRINFOEXW *hints OPTIONAL,
+               OUT PADDRINFOEXW *ppResult,
+               IN struct timeval *timeout OPTIONAL,
+               IN LPOVERLAPPED lpOverlapped OPTIONAL,
+               IN LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine OPTIONAL,
+               OUT LPHANDLE lpHandle OPTIONAL)
+{
+    INT ErrorCode;
+    ADDRINFOW hintsW;
+    PADDRINFOW resW = NULL;
+    PADDRINFOW curW;
+    PADDRINFOEXW firstEx = NULL, prevEx = NULL, curEx;
+
+    DPRINT("GetAddrInfoExW: %S, %S, %lx, %p, %p\n", pName, pServiceName, dwNameSpace, hints, ppResult);
+
+    if (!ppResult)
+    {
+        SetLastError(WSAEINVAL);
+        return WSAEINVAL;
+    }
+    *ppResult = NULL;
+
+    /* Check for WSAStartup */
+    if ((ErrorCode = WsQuickProlog()) != ERROR_SUCCESS) return ErrorCode;
+
+    /* Convert hints if provided */
+    if (hints)
+    {
+        RtlZeroMemory(&hintsW, sizeof(hintsW));
+        hintsW.ai_flags = hints->ai_flags;
+        hintsW.ai_family = hints->ai_family;
+        hintsW.ai_socktype = hints->ai_socktype;
+        hintsW.ai_protocol = hints->ai_protocol;
+    }
+
+    ErrorCode = GetAddrInfoW(pName, pServiceName, hints ? &hintsW : NULL, &resW);
+    if (ErrorCode != ERROR_SUCCESS)
+    {
+        if (lpOverlapped)
+        {
+            lpOverlapped->Internal = ErrorCode;
+            lpOverlapped->InternalHigh = 0;
+        }
+        if (lpCompletionRoutine)
+        {
+            lpCompletionRoutine(ErrorCode, 0, (LPWSAOVERLAPPED)lpOverlapped);
+        }
+        SetLastError(ErrorCode);
+        return ErrorCode;
+    }
+
+    /* Convert each ADDRINFOW node to ADDRINFOEXW */
+    for (curW = resW; curW; curW = curW->ai_next)
+    {
+        curEx = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(ADDRINFOEXW));
+        if (!curEx)
+        {
+            if (firstEx) FreeAddrInfoExW(firstEx);
+            FreeAddrInfoW(resW);
+            SetLastError(EAI_MEMORY);
+            return EAI_MEMORY;
+        }
+
+        curEx->ai_flags = curW->ai_flags;
+        curEx->ai_family = curW->ai_family;
+        curEx->ai_socktype = curW->ai_socktype;
+        curEx->ai_protocol = curW->ai_protocol;
+        curEx->ai_addrlen = curW->ai_addrlen;
+
+        /* Take ownership of ai_canonname and ai_addr */
+        curEx->ai_canonname = curW->ai_canonname;
+        curW->ai_canonname = NULL;
+
+        curEx->ai_addr = curW->ai_addr;
+        curW->ai_addr = NULL;
+
+        if (!firstEx)
+            firstEx = curEx;
+        else
+            prevEx->ai_next = curEx;
+        prevEx = curEx;
+    }
+
+    /* Free the resW node structures whose buffers were transferred */
+    FreeAddrInfoW(resW);
+
+    *ppResult = firstEx;
+
+    if (lpHandle)
+        *lpHandle = (HANDLE)0xdeadbeef;
+
+    if (lpOverlapped)
+    {
+        lpOverlapped->Internal = ERROR_SUCCESS;
+        lpOverlapped->InternalHigh = 0;
+    }
+
+    if (lpCompletionRoutine)
+    {
+        lpCompletionRoutine(ERROR_SUCCESS, 0, (LPWSAOVERLAPPED)lpOverlapped);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
+INT
+WSAAPI
+GetAddrInfoExA(IN PCSTR pName OPTIONAL,
+               IN PCSTR pServiceName OPTIONAL,
+               IN DWORD dwNameSpace,
+               IN LPGUID lpNspId OPTIONAL,
+               IN const ADDRINFOEXA *hints OPTIONAL,
+               OUT PADDRINFOEXA *ppResult,
+               IN struct timeval *timeout OPTIONAL,
+               IN LPOVERLAPPED lpOverlapped OPTIONAL,
+               IN LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine OPTIONAL,
+               OUT LPHANDLE lpNameHandle OPTIONAL)
+{
+    INT ErrorCode;
+    LPWSTR UnicodeNodeName = NULL;
+    LPWSTR UnicodeServName = NULL;
+    ADDRINFOEXW hintsW;
+    PADDRINFOEXW resW = NULL;
+    PADDRINFOEXW curW;
+    PADDRINFOEXA firstA = NULL, prevA = NULL, curA;
+
+    DPRINT("GetAddrInfoExA: %s, %s, %lx, %p, %p\n", pName, pServiceName, dwNameSpace, hints, ppResult);
+
+    if (!ppResult)
+    {
+        SetLastError(WSAEINVAL);
+        return WSAEINVAL;
+    }
+    *ppResult = NULL;
+
+    /* Check for WSAStartup */
+    if ((ErrorCode = WsQuickProlog()) != ERROR_SUCCESS) return ErrorCode;
+
+    if (pName)
+    {
+        UnicodeNodeName = UnicodeDupFromAnsi((LPSTR)pName);
+        if (!UnicodeNodeName)
+        {
+            ErrorCode = EAI_MEMORY;
+            goto Cleanup;
+        }
+    }
+
+    if (pServiceName)
+    {
+        UnicodeServName = UnicodeDupFromAnsi((LPSTR)pServiceName);
+        if (!UnicodeServName)
+        {
+            ErrorCode = EAI_MEMORY;
+            goto Cleanup;
+        }
+    }
+
+    if (hints)
+    {
+        RtlZeroMemory(&hintsW, sizeof(hintsW));
+        hintsW.ai_flags = hints->ai_flags;
+        hintsW.ai_family = hints->ai_family;
+        hintsW.ai_socktype = hints->ai_socktype;
+        hintsW.ai_protocol = hints->ai_protocol;
+    }
+
+    ErrorCode = GetAddrInfoExW(UnicodeNodeName,
+                               UnicodeServName,
+                               dwNameSpace,
+                               lpNspId,
+                               hints ? &hintsW : NULL,
+                               &resW,
+                               timeout,
+                               lpOverlapped,
+                               lpCompletionRoutine,
+                               lpNameHandle);
+
+    if (ErrorCode == ERROR_SUCCESS && resW)
+    {
+        for (curW = resW; curW; curW = curW->ai_next)
+        {
+            curA = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(ADDRINFOEXA));
+            if (!curA)
+            {
+                if (firstA) FreeAddrInfoEx(firstA);
+                FreeAddrInfoExW(resW);
+                ErrorCode = EAI_MEMORY;
+                goto Cleanup;
+            }
+
+            curA->ai_flags = curW->ai_flags;
+            curA->ai_family = curW->ai_family;
+            curA->ai_socktype = curW->ai_socktype;
+            curA->ai_protocol = curW->ai_protocol;
+            curA->ai_addrlen = curW->ai_addrlen;
+
+            if (curW->ai_canonname)
+            {
+                curA->ai_canonname = AnsiDupFromUnicode(curW->ai_canonname);
+            }
+
+            curA->ai_addr = curW->ai_addr;
+            curW->ai_addr = NULL;
+
+            if (!firstA)
+                firstA = curA;
+            else
+                prevA->ai_next = curA;
+            prevA = curA;
+        }
+
+        FreeAddrInfoExW(resW);
+        *ppResult = firstA;
+    }
+
+Cleanup:
+    if (UnicodeNodeName) HeapFree(WsSockHeap, 0, UnicodeNodeName);
+    if (UnicodeServName) HeapFree(WsSockHeap, 0, UnicodeServName);
+    SetLastError(ErrorCode);
+    return ErrorCode;
+}
+
+/*
+ * @implemented
+ */
+INT
+WSAAPI
+GetAddrInfoExCancel(IN LPHANDLE lpHandle)
+{
+    UNREFERENCED_PARAMETER(lpHandle);
+    DPRINT("GetAddrInfoExCancel(%p)\n", lpHandle);
+    SetLastError(WSAEOPNOTSUPP);
+    return SOCKET_ERROR;
+}
+
+/*
+ * @implemented
+ */
+INT
+WSAAPI
+GetAddrInfoExOverlappedResult(IN LPOVERLAPPED lpOverlapped)
+{
+    if (!lpOverlapped)
+        return WSAEINVAL;
+    return (INT)lpOverlapped->Internal;
 }

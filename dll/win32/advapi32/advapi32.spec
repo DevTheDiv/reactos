@@ -28,6 +28,8 @@
 @ stdcall AddAuditAccessAce(ptr long long ptr long long)
 @ stdcall AddAuditAccessAceEx(ptr long long long ptr long long)
 @ stdcall AddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long)
+@ stdcall AddConditionalAce(ptr long long long long ptr wstr ptr)
+@ stdcall AddMandatoryAce(ptr long long long ptr)
 @ stdcall AddUsersToEncryptedFile(wstr ptr)
 @ stdcall AdjustTokenGroups(long long ptr long ptr ptr)
 @ stdcall AdjustTokenPrivileges(long long ptr long ptr ptr)
