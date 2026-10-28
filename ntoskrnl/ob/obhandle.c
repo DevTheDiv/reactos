@@ -3034,9 +3034,10 @@ ObInsertObject(IN PVOID Object,
             (ObjectType->TypeInfo.SecurityRequired) &&
             (NewObject == NULL)));
 
-    /* Check if the object is unnamed and also doesn't have security */
+    /* Only bypass security assignment when no descriptor was supplied. */
     PreviousMode = KeGetPreviousMode();
-    if (!(ObjectType->TypeInfo.SecurityRequired) && !(ObjectName))
+    if (!(ObjectType->TypeInfo.SecurityRequired) && !(ObjectName) &&
+        !(ObjectCreateInfo->SecurityDescriptor))
     {
         /* Assume failure */
         *Handle = NULL;
@@ -3192,8 +3193,9 @@ ObInsertObject(IN PVOID Object,
     /* Now check if this object is being created */
     if (InsertObject == Object)
     {
-        /* Check if it's named or forces security */
-        if ((ObjectName) || (ObjectType->TypeInfo.SecurityRequired))
+        /* Honor explicit security descriptors on unnamed objects as well. */
+        if ((ObjectName) || (ObjectType->TypeInfo.SecurityRequired) ||
+            (AccessState->SecurityDescriptor))
         {
             /* Make sure it's inserted into an object directory */
             if ((ObjectNameInfo) && (ObjectNameInfo->Directory))
