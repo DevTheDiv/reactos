@@ -30,6 +30,8 @@ working Chrome disk and default launcher were left untouched.
 - Full boot CD built and installed to the separate disk. Native MinGW Makefiles
   and native WinFlexBison were used because Ninja/MSYS tools stalled in this host
   environment. Generated Makefile path repairs were confined to build output.
+  The follow-up full boot CD build including the CFG compatibility change also
+  passed (`vm/upstream-run-09.log`, 382,730,240-byte `bootcd.iso`).
 - Native `NtDuplicateObject` API test: 19 checks, zero failures.
 - Native shcore test: 231 checks, zero failures.
 - New VirtualMemory API test: 13 checks, zero failures after deploying the rebuilt
