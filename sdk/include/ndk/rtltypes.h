@@ -1223,6 +1223,14 @@ typedef struct _RTL_DEBUG_INFORMATION
 // Fiber local storage data
 //
 #define RTL_FLS_MAXIMUM_AVAILABLE 128
+
+/* Callback records used by the NT6 RTL FLS allocator. */
+typedef struct _RTL_FLS_CALLBACK_INFO
+{
+    VOID (NTAPI *Callback)(PVOID);
+    PVOID Unknown;
+} RTL_FLS_CALLBACK_INFO, *PRTL_FLS_CALLBACK_INFO;
+
 typedef struct _RTL_FLS_DATA
 {
     LIST_ENTRY ListEntry;

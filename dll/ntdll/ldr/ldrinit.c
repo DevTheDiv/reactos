@@ -1266,7 +1266,11 @@ LdrShutdownThread(VOID)
 
         for (n = 1; n <= FlsHighIndex; ++n)
         {
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+            lpCallback = ((PRTL_FLS_CALLBACK_INFO)NtCurrentPeb()->FlsCallback)[n].Callback;
+#else
             lpCallback = NtCurrentPeb()->FlsCallback[n];
+#endif
             if (lpCallback && pFlsData->Data[n])
             {
                 lpCallback(pFlsData->Data[n]);

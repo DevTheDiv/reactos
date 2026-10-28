@@ -22,12 +22,6 @@
 /* The FLS lock. We don't use it yet since kernel32 uses the PEB lock and we need to synchronize with this for now */
 //RTL_SRWLOCK RtlpFlsLock = RTL_SRWLOCK_INIT;
 
-typedef struct _FLS_CALLBACK_INFO
-{
-    PFLS_CALLBACK_FUNCTION Callback;
-    PVOID Unknown;
-} FLS_CALLBACK_INFO, *PFLS_CALLBACK_INFO;
-
 static
 VOID
 RtlpAcquireFlsLock(VOID)
@@ -56,7 +50,7 @@ RtlpAllocateFlsCallbackArray(VOID)
     /* Allocate a new callback array */
     newCallbacks = RtlAllocateHeap(RtlGetProcessHeap(),
                                    HEAP_ZERO_MEMORY,
-                                   RTL_FLS_MAXIMUM_AVAILABLE * sizeof(FLS_CALLBACK_INFO));
+                                   RTL_FLS_MAXIMUM_AVAILABLE * sizeof(RTL_FLS_CALLBACK_INFO));
     if (newCallbacks == NULL)
     {
         return STATUS_NO_MEMORY;
@@ -155,7 +149,7 @@ RtlFlsAllocEx(
     }
 
     /* Set the callback */
-    PFLS_CALLBACK_INFO callbacks = (PFLS_CALLBACK_INFO)peb->FlsCallback;
+    PRTL_FLS_CALLBACK_INFO callbacks = (PRTL_FLS_CALLBACK_INFO)peb->FlsCallback;
     callbacks[index].Callback = Callback;
 
     /* Update high index */
@@ -202,7 +196,7 @@ RtlFlsFree(
     }
 
     /* Check if there is a callback */
-    PFLS_CALLBACK_INFO callbackArray = (PFLS_CALLBACK_INFO)peb->FlsCallback;
+    PRTL_FLS_CALLBACK_INFO callbackArray = (PRTL_FLS_CALLBACK_INFO)peb->FlsCallback;
     PFLS_CALLBACK_FUNCTION callbackFunction = callbackArray[FlsIndex].Callback;
 
     /* Clear the FLS index bit */

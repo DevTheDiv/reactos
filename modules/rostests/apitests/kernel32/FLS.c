@@ -134,6 +134,83 @@ static VOID init_funcs(void)
 
 
 
+static DWORD RundownIndices[2];
+static LONG RundownCalls[2];
+static PVOID RundownMainFiber;
+
+static VOID WINAPI RundownCallback1(PVOID value)
+{
+    ok(value == (PVOID)0x1111, "Unexpected first callback value %p\n", value);
+    InterlockedIncrement(&RundownCalls[0]);
+}
+
+static VOID WINAPI RundownCallback2(PVOID value)
+{
+    ok(value == (PVOID)0x2222, "Unexpected second callback value %p\n", value);
+    InterlockedIncrement(&RundownCalls[1]);
+}
+
+static DWORD WINAPI RundownThread(PVOID context)
+{
+    ok(pFlsSetValue(RundownIndices[0], (PVOID)0x1111), "First FlsSetValue failed\n");
+    ok(pFlsSetValue(RundownIndices[1], (PVOID)0x2222), "Second FlsSetValue failed\n");
+    return 0;
+}
+
+static VOID WINAPI RundownFiber(PVOID context)
+{
+    RundownThread(context);
+    SwitchToFiber(RundownMainFiber);
+}
+
+static VOID test_fls_rundown(VOID)
+{
+    HANDLE thread;
+    PVOID fiber;
+    DWORD result;
+
+    RundownIndices[0] = pFlsAlloc(RundownCallback1);
+    RundownIndices[1] = pFlsAlloc(RundownCallback2);
+    if (RundownIndices[0] == FLS_OUT_OF_INDEXES || RundownIndices[1] == FLS_OUT_OF_INDEXES)
+    {
+        skip("Cannot allocate FLS rundown indices\n");
+        if (RundownIndices[0] != FLS_OUT_OF_INDEXES) pFlsFree(RundownIndices[0]);
+        if (RundownIndices[1] != FLS_OUT_OF_INDEXES) pFlsFree(RundownIndices[1]);
+        return;
+    }
+
+    thread = CreateThread(NULL, 0, RundownThread, NULL, 0, NULL);
+    ok(thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (thread)
+    {
+        result = WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+        ok(result == WAIT_OBJECT_0, "Thread rundown returned %lu\n", result);
+        if (result != WAIT_OBJECT_0) return;
+        ok_int(RundownCalls[0], 1);
+        ok_int(RundownCalls[1], 1);
+    }
+
+    RundownMainFiber = ConvertThreadToFiber(NULL);
+    ok(RundownMainFiber != NULL, "ConvertThreadToFiber failed: %lu\n", GetLastError());
+    if (RundownMainFiber)
+    {
+        RundownCalls[0] = RundownCalls[1] = 0;
+        fiber = CreateFiber(0, RundownFiber, NULL);
+        ok(fiber != NULL, "CreateFiber failed: %lu\n", GetLastError());
+        if (fiber)
+        {
+            SwitchToFiber(fiber);
+            DeleteFiber(fiber);
+            ok_int(RundownCalls[0], 1);
+            ok_int(RundownCalls[1], 1);
+        }
+        ok(ConvertFiberToThread(), "ConvertFiberToThread failed: %lu\n", GetLastError());
+    }
+    pFlsFree(RundownIndices[0]);
+    pFlsFree(RundownIndices[1]);
+}
+
 START_TEST(FLS)
 {
     RTL_OSVERSIONINFOW rtlinfo = { sizeof(rtlinfo) };
@@ -151,6 +228,8 @@ START_TEST(FLS)
         skip("RtlIsCriticalSectionLockedByThread function not available\n");
         return;
     }
+
+    test_fls_rundown();
 
     RtlGetVersion(&rtlinfo);
     g_WinVersion = (rtlinfo.dwMajorVersion << 8) | rtlinfo.dwMinorVersion;

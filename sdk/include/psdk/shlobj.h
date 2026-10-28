@@ -40,7 +40,6 @@ extern "C" {
 
 #include <shtypes.h>
 #include <shobjidl.h>
-#include <knownfolders.h>
 
 #include <pshpack8.h>
 
@@ -229,14 +228,7 @@ SHGetKnownFolderItem(
 
 #define SHGetFolderPathAndSubDir WINELIB_NAME_AW(SHGetFolderPathAndSubDir)
 
-HRESULT
-WINAPI
-SHGetKnownFolderPath(
-  _In_ REFKNOWNFOLDERID rfid,
-  _In_ DWORD dwFlags,
-  _In_opt_ HANDLE hToken,
-  _Outptr_ PWSTR *ppszPath);
-
+#if (NTDDI_VERSION >= NTDDI_VISTA) || defined(__REACTOS__)
 HRESULT
 WINAPI
 SHGetFolderPathEx(
@@ -244,7 +236,8 @@ SHGetFolderPathEx(
   _In_ DWORD dwFlags,
   _In_opt_ HANDLE hToken,
   _Out_writes_(cchPath) LPWSTR pszPath,
-  _In_ UINT cchPath);
+  _In_ DWORD cchPath);
+#endif
 
 HRESULT WINAPI
 SHSetFolderPathA(

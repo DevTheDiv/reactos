@@ -1247,33 +1247,36 @@ CreateWaitableTimerExW(
     _In_ DWORD dwFlags,
     _In_ DWORD dwDesiredAccess)
 {
-    HANDLE Handle;
-    NTSTATUS Status;
-    UNICODE_STRING ObjectName;
-    OBJECT_ATTRIBUTES LocalAttributes;
-    POBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Handle, ReducedHandle;
+    DWORD Error;
+    BOOL Inherit = lpTimerAttributes && lpTimerAttributes->bInheritHandle;
 
-    if (lpTimerName) RtlInitUnicodeString(&ObjectName, lpTimerName);
-    ObjectAttributes = BaseFormatObjectAttributes(&LocalAttributes,
-                                                  lpTimerAttributes,
-                                                  lpTimerName ? &ObjectName : NULL);
-
-    Status = NtCreateTimer(&Handle,
-                           dwDesiredAccess,
-                           ObjectAttributes,
-                           (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
-                               NotificationTimer : SynchronizationTimer);
-    if (Status == STATUS_OBJECT_NAME_EXISTS)
+    /* This code also builds into the standalone kernel32_vista DLL, which
+     * cannot call kernel32's private object-namespace helpers. */
+    Handle = CreateWaitableTimerW(lpTimerAttributes,
+                                  !!(dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET),
+                                  lpTimerName);
+    Error = GetLastError();
+    if (!Handle)
     {
-        SetLastError(ERROR_ALREADY_EXISTS);
-    }
-    else
-    {
-        BaseSetLastNTError(Status);
+        /* An existing timer may permit the requested access without granting
+         * TIMER_ALL_ACCESS, which the classic creation API requests. */
+        if (lpTimerName && Error == ERROR_ACCESS_DENIED)
+        {
+            Handle = OpenWaitableTimerW(dwDesiredAccess, Inherit, lpTimerName);
+            if (Handle) SetLastError(ERROR_ALREADY_EXISTS);
+        }
+        return Handle;
     }
 
-    if (!NT_SUCCESS(Status)) return NULL;
-    return Handle;
+    if (!DuplicateHandle(GetCurrentProcess(), Handle, GetCurrentProcess(),
+                         &ReducedHandle, dwDesiredAccess, Inherit,
+                         DUPLICATE_CLOSE_SOURCE))
+    {
+        return NULL;
+    }
+    SetLastError(Error);
+    return ReducedHandle;
 }
 
 /* Internal concrete layout behind the opaque PROC_THREAD_ATTRIBUTE_LIST pointer type */
