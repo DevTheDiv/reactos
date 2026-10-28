@@ -9,12 +9,23 @@
 
 #include "precomp.h"
 
+#define DEFAULT_COLUMN0_WIDTH 200
+
 CConsoleWnd::CConsoleWnd(CMainWnd *MainWnd, CSnapin *RootNode, CSnapin *SelectedNode)
 {
     m_MainWnd = MainWnd;
     m_ViewRootNode = RootNode;
     m_ViewSelectedNode = SelectedNode ? SelectedNode : RootNode;
     m_ListViewMode = ListView_Detail;
+    m_ViewId = 0;
+
+    m_iTreeViewWidth = 0;
+    m_iActionsPaneWidth = 0;
+    m_bStatusBarVisible = TRUE;
+    m_bDescriptionBarVisible = FALSE;
+    m_bTreeViewVisible = TRUE;
+    m_bActionsPaneVisible = FALSE;
+
     m_pfnSuperWindowProc = DefMDIChildProc;
 
     m_hMenuTreeView = LoadMenu(_AtlBaseModule.GetModuleInstance(), MAKEINTRESOURCE(IDM_TREEVIEW_CONTEXT));
@@ -34,18 +45,15 @@ CConsoleWnd::OnCreate(UINT nMessage, WPARAM wParam, LPARAM lParam, BOOL& bHandle
 {
     SetWindowLongPtr(0, (LONG_PTR)this);
 
-    m_bStatusBarVisible = TRUE;
-    m_bDescriptionBarVisible = FALSE;
-    m_bTreeViewVisible = TRUE;
-    m_bActionsPaneVisible = FALSE;
-
     m_iSplitterWidth = 4;
     m_iSplitSide = SPLITTER_NONE;
 
     RECT Rect;
     GetClientRect(&Rect);
-    m_iTreeViewWidth = (Rect.right - Rect.left) / 4;
-    m_iActionsPaneWidth = (Rect.right - Rect.left) / 4;
+    if (m_iTreeViewWidth == 0)
+        m_iTreeViewWidth = (Rect.right - Rect.left) / 4;
+    if (m_iActionsPaneWidth == 0)
+        m_iActionsPaneWidth = (Rect.right - Rect.left) / 4;
 
     m_StatusBar.Create(this->m_hWnd, NULL);
     m_StatusBar.GetClientRect(&Rect);
@@ -67,19 +75,24 @@ CConsoleWnd::OnCreate(UINT nMessage, WPARAM wParam, LPARAM lParam, BOOL& bHandle
 
     m_ListView.Create(this->m_hWnd, &Rect, NULL, WS_CHILD | WS_VISIBLE | ViewModeToStyle(m_ListViewMode), WS_EX_CLIENTEDGE);
 
+    CAtlString Column0Name(MAKEINTRESOURCE(IDS_COLUMN0)); /* FIXME */
+    m_ListView.InsertColumn(0, Column0Name.GetString(), LVCFMT_LEFT, DEFAULT_COLUMN0_WIDTH);
+
     Rect.right = 0;
     Rect.left = 0;
     Rect.top = 0;
     Rect.bottom = 0;
     m_ActionsPane.Create(this->m_hWnd, &Rect, L"Actions", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE);
 
-    m_ViewId = m_MainWnd->RegisterView(this);
+    m_MainWnd->RegisterView(this);
 
     UpdateTreeView();
 
     LPMDICREATESTRUCT mdicreate = reinterpret_cast<LPMDICREATESTRUCT>(reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
     if (mdicreate->lParam)
         PostMessage(WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+
+    m_MainWnd->UpdateViewMenu(m_ListViewMode);
 
     return 0;
 }
@@ -322,7 +335,7 @@ CConsoleWnd::OnNotify(UINT nMessage, WPARAM wParam, LPARAM lParam, BOOL& bHandle
 LRESULT
 CConsoleWnd::OnActivate(UINT nMessage, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 {
-//    m_MainWnd->UpdateToolbuttons(m_bTreeViewVisible, m_bActionsPaneVisible);
+    m_MainWnd->UpdateToolbuttons(m_bTreeViewVisible, m_bActionsPaneVisible);
     m_MainWnd->UpdateViewMenu(m_ListViewMode);
     return 0;
 }
@@ -340,7 +353,6 @@ CConsoleWnd::OnActionNewWindow(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& b
 
     MDICREATESTRUCT mcs;
     HWND hChild;
-    CAtlString title;
 
     mcs.szTitle = Snapin->DisplayName();
     mcs.szClass = CConsoleWnd::GetWndClassName();
@@ -357,7 +369,13 @@ CConsoleWnd::OnActionNewWindow(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& b
     if (!hChild)
     {
         delete child;
+		return 0;
     }
+
+    m_MainWnd->UpdateLayout();
+    m_MainWnd->UpdateTitle();
+    m_MainWnd->UpdateMenu();
+    m_MainWnd->UpdateViewMenu(child->GetListViewMode());
 
     return 0;
 }
@@ -614,7 +632,8 @@ CConsoleWnd::SaveView(MscFile *mscFile, IXMLDOMElement *pParentElement)
         CHK_HR(mscFile->CreateAndAddAttributeNode(L"NoStatusBar", L"true", pViewOptionsElement));
     CHK_HR(mscFile->CreateAndAddAttributeNode(L"ActionsPaneVisible", IsActionsPaneVisible() ? L"true" : L"false", pViewOptionsElement));
     CHK_HR(mscFile->CreateAndAddAttributeNode(L"DescriptionBarVisible", IsDescriptionBarVisible() ? L"true" : L"false", pViewOptionsElement));
-    CHK_HR(mscFile->CreateAndAddAttributeNode(L"DefaultColumn0Width", L"200", pViewOptionsElement)); /* FIXME */
+    _swprintf(szBuffer, L"%d", m_ListView.GetColumnWidth(0));
+    CHK_HR(mscFile->CreateAndAddAttributeNode(L"DefaultColumn0Width", szBuffer, pViewOptionsElement));
     CHK_HR(mscFile->CreateAndAddAttributeNode(L"DefaultColumn1Width", L"0", pViewOptionsElement)); /* FIXME */
     SAFE_RELEASE(pViewOptionsElement); /* </ViewOptions> */
 
@@ -622,6 +641,248 @@ CleanUp:
     SAFE_RELEASE(pViewElement); /* </View> */
 }
 
+HRESULT
+CConsoleWnd::ParseViewAttributes(
+    MscFile *mscFile,
+    IXMLDOMElement *pViewElement,
+    UINT *puViewID,
+    INT *piScopePanelWidth,
+    INT *piActionsPanelWidth)
+{
+    VARIANT ViewID, ScopePanel, ActionsPanel;
+    PWSTR ptr = NULL;
+    HRESULT hr = S_OK;
+
+    VariantInit(&ViewID);
+    VariantInit(&ScopePanel);
+    VariantInit(&ActionsPanel);
+
+    /* Attribut ID */
+    hr = mscFile->GetAttribute(pViewElement, (LPWSTR)L"ID", &ViewID);
+    if (hr == S_OK)
+    {
+        *puViewID = wcstoul(V_BSTR(&ViewID), &ptr, 10);
+    }
+
+    /* Attribute ScopePaneWidth */
+    hr = mscFile->GetAttribute(pViewElement, (LPWSTR)L"ScopePaneWidth", &ScopePanel);
+    if (hr == S_OK)
+    {
+        *piScopePanelWidth = wcstol(V_BSTR(&ScopePanel), &ptr, 10);
+    }
+
+    /* Attribute ActionsPaneWidth */
+    hr = mscFile->GetAttribute(pViewElement, (LPWSTR)L"ActionsPaneWidth", &ActionsPanel);
+    if (hr == S_OK)
+    {
+        *piActionsPanelWidth = wcstol(V_BSTR(&ActionsPanel), &ptr, 10);
+    }
+
+    VariantClear(&ViewID);
+    VariantClear(&ScopePanel);
+    VariantClear(&ActionsPanel);
+
+    return hr;
+}
+
+HRESULT
+CConsoleWnd::ParseView(
+    CMainWnd *pMainWnd,
+    MscFile *mscFile,
+    IXMLDOMElement *pViewElement)
+{
+    IXMLDOMNodeList *pChildList = NULL;
+    IXMLDOMNode *nextItem;
+    DOMNodeType NodeType;
+    BSTR NodeName = NULL;
+    CSnapin *pRootSnapin = NULL, *pSelectedSnapin = NULL;
+
+    MDICREATESTRUCT mcs;
+    HWND hChild;
+    HWND hWndOld;
+    BOOL bMaximized;
+    CConsoleWnd *pConsoleWnd = NULL;
+
+    UINT uViewId = 0;
+    INT iScopePanelWidth = 0;
+    INT iActionsPanelWidth = 0;
+    LISTVIEW_MODE ListViewMode = ListView_Detail;
+    BOOL bScopePaneVisible = FALSE;
+    BOOL bActionsPaneVisible = FALSE;
+    BOOL bDescriptionBarVisible = FALSE;
+    INT iColumn0Width = DEFAULT_COLUMN0_WIDTH;
+    HRESULT hr = S_OK;
+
+    ParseViewAttributes(mscFile, pViewElement, &uViewId, &iScopePanelWidth, &iActionsPanelWidth);
+
+    hr = pViewElement->get_childNodes(&pChildList);
+    if (FAILED(hr))
+        goto done;
+
+    for (;;)
+    {
+        hr = pChildList->nextNode(&nextItem);
+        if (hr == S_FALSE)
+        {
+            hr = S_OK;
+            break;
+        }
+
+        hr = nextItem->get_nodeType(&NodeType);
+        if (hr == S_OK)
+        {
+            NodeName = NULL;
+            hr = nextItem->get_baseName(&NodeName);
+            if (hr == S_OK)
+            {
+                if (NodeType == NODE_ELEMENT)
+                {
+                    if (_wcsicmp(NodeName, L"BookMark") == 0)
+                    {
+                        VARIANT Name, NodeID;
+
+                        VariantInit(&Name);
+                        VariantInit(&NodeID);
+
+                        hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"Name", &Name);
+                        if (hr == S_OK)
+                        {
+                            hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"NodeID", &NodeID);
+                            if (hr == S_OK)
+                            {
+                                PWSTR ptr = NULL;
+                                UINT uNodeId = wcstoul(V_BSTR(&NodeID), &ptr, 10);
+                                if (uNodeId != 0)
+                                {
+                                    CSnapin *pSnapin = pMainWnd->m_TempNodeMap->Lookup(uNodeId);
+                                    if (pSnapin)
+                                    {
+                                        if (_wcsicmp(V_BSTR(&Name), L"RootNode") == 0)
+                                            pRootSnapin = pSnapin;
+                                        else if (_wcsicmp(V_BSTR(&Name), L"SelectedNode") == 0)
+                                            pRootSnapin = pSnapin;
+                                    }
+                                }
+                            }
+                        }
+
+                        VariantClear(&Name);
+                        VariantClear(&NodeID);
+                    }
+                    else if (_wcsicmp(NodeName, L"ViewOptions") == 0)
+                    {
+                        VARIANT ViewMode, ScopePane, ActionsPane;
+                        VARIANT DescriptionBar, Column0Width;
+
+                        VariantInit(&ViewMode);
+                        VariantInit(&ScopePane);
+                        VariantInit(&ActionsPane);
+                        VariantInit(&DescriptionBar);
+                        VariantInit(&Column0Width);
+
+                        /* Attribut ViewMode="Report" */
+                        hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"ViewMode", &ViewMode);
+                        if (hr == S_OK)
+                        {
+                            ListViewMode = StringToViewMode(V_BSTR(&ViewMode));
+                        }
+
+                        /* Attribut ScopePaneVisible="true" */
+                        hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"ScopePaneVisible", &ScopePane);
+                        if (hr == S_OK)
+                        {
+                            bScopePaneVisible = StringToBool(V_BSTR(&ScopePane));
+                        }
+
+                        /* Attribut ActionsPaneVisible="true" */
+                        hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"ActionsPaneVisible", &ActionsPane);
+                        if (hr == S_OK)
+                        {
+                            bActionsPaneVisible = StringToBool(V_BSTR(&ActionsPane));
+                        }
+
+                        /* Attribut DescriptionBarVisible="false" */
+                        hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"DescriptionBarVisible", &DescriptionBar);
+                        if (hr == S_OK)
+                        {
+                            bDescriptionBarVisible = StringToBool(V_BSTR(&DescriptionBar));
+                        }
+
+                        /* Attribut DefaultColumn0Width="200" */
+                        hr = mscFile->GetAttribute((IXMLDOMElement *)nextItem, (LPWSTR)L"DefaultColumn0Width", &Column0Width);
+                        if (hr == S_OK)
+                        {
+                            iColumn0Width = _wtoi(V_BSTR(&Column0Width));
+                        }
+
+                        /* FIXME: Attribut DefaultColumn1Width="0" */
+
+                        VariantClear(&ViewMode);
+                        VariantClear(&ScopePane);
+                        VariantClear(&ActionsPane);
+                        VariantClear(&DescriptionBar);
+                        VariantClear(&Column0Width);
+                    }
+                }
+
+                SysFreeString(NodeName);
+                NodeName = NULL;
+            }
+        }
+
+        nextItem->Release();
+    }
+
+    if (FAILED(hr))
+        goto done;
+
+    /* Create the view */
+
+    mcs.szTitle = pRootSnapin->DisplayName();
+    mcs.szClass = CConsoleWnd::GetWndClassName();
+    mcs.hOwner = _AtlBaseModule.GetModuleInstance();
+    mcs.x = mcs.cx = CW_USEDEFAULT;
+    mcs.y = mcs.cy = CW_USEDEFAULT;
+    mcs.style = MDIS_ALLCHILDSTYLES;
+
+    pConsoleWnd = new CConsoleWnd(pMainWnd, pRootSnapin, pSelectedSnapin);
+
+    pConsoleWnd->m_ViewId = uViewId;
+    pConsoleWnd->m_iTreeViewWidth = iScopePanelWidth;
+    pConsoleWnd->m_iActionsPaneWidth = iActionsPanelWidth;
+
+    bMaximized = FALSE;
+    hWndOld = (HWND)pMainWnd->m_MDIClient.SendMessage(WM_MDIGETACTIVE, 0, (LPARAM)&bMaximized);
+    mcs.lParam = bMaximized || !hWndOld;
+    hChild = (HWND)pMainWnd->m_MDIClient.SendMessage(WM_MDICREATE, 0, (LONG_PTR)&mcs);
+    if (!hChild)
+    {
+        delete pConsoleWnd;
+        hr = E_FAIL;
+        goto done;
+    }
+
+    pConsoleWnd->SetListViewMode(ListViewMode);
+    pConsoleWnd->SetTreeViewVisible(bScopePaneVisible);
+    pConsoleWnd->SetActionsPaneVisible(bActionsPaneVisible);
+    pConsoleWnd->SetDescriptionBarVisible(bDescriptionBarVisible);
+
+    pConsoleWnd->m_ListView.SetColumnWidth(0, iColumn0Width);
+
+    pMainWnd->UpdateLayout();
+    pMainWnd->UpdateTitle();
+    pMainWnd->UpdateMenu();
+    pMainWnd->UpdateViewMenu(ListViewMode);
+
+done:
+    if (pChildList)
+        pChildList->Release();
+
+    if (NodeName)
+        SysFreeString(NodeName);
+
+    return hr;
+}
 
 // +IConsole
 STDMETHODIMP

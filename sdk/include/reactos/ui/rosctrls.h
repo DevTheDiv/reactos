@@ -88,6 +88,11 @@ public:
         return (int)SendMessage(LVM_GETCOLUMNWIDTH, iCol);
     }
 
+    BOOL SetColumnWidth(int iCol, int width)
+    {
+        return (BOOL)SendMessage(LVM_SETCOLUMNWIDTH, iCol, width);
+    }
+
     HIMAGELIST SetImageList(HIMAGELIST himl, int iImageList)
     {
         return (HIMAGELIST)SendMessage(LVM_SETIMAGELIST, iImageList, reinterpret_cast<LPARAM>(himl));
@@ -362,6 +367,11 @@ public: // Button list management methods
     DWORD CheckButton(int cmdId, BOOL bCheck)
     {
         return SendMessageW(TB_CHECKBUTTON, cmdId, MAKELPARAM(bCheck, 0));
+    }
+
+    DWORD HideButton(int cmdId, BOOL bHide)
+    {
+        return SendMessageW(TB_HIDEBUTTON, cmdId, MAKELPARAM(bHide, 0));
     }
 
 public: // Layout management methods

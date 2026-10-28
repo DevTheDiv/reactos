@@ -301,4 +301,6 @@
     SVC_(GetCurrentProcessorNumberEx, 1)
     SVC_(CancelIoFileEx, 3)
     SVC_(OpenKeyEx, 4)
+    SVC_(GetNextProcess, 5)
+    SVC_(GetNextThread, 6)
 #endif

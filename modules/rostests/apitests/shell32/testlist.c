@@ -12,6 +12,7 @@ extern void func_CMyComputer(void);
 extern void func_CommandLineToArgvW(void);
 extern void func_CShellDesktop(void);
 extern void func_CShellDispatch(void);
+extern void func_CShellItem(void);
 extern void func_CShellLink(void);
 extern void func_CUserNotification(void);
 extern void func_DragDrop(void);
@@ -35,6 +36,7 @@ extern void func_PathProcessCommand(void);
 extern void func_PathResolve(void);
 extern void func_PIDL(void);
 extern void func_RealShellExecuteEx(void);
+extern void func_RegenerateUserEnvironment(void);
 extern void func_SHAppBarMessage(void);
 extern void func_SHChangeNotify(void);
 extern void func_SHCreateDataObject(void);
@@ -78,6 +80,7 @@ const struct test winetest_testlist[] =
     { "CommandLineToArgvW", func_CommandLineToArgvW },
     { "CShellDesktop", func_CShellDesktop },
     { "CShellDispatch", func_CShellDispatch },
+    { "CShellItem", func_CShellItem },
     { "CShellLink", func_CShellLink },
     //{ "CUserNotification", func_CUserNotification }, // Test is broken on Win 2003
     { "DragDrop", func_DragDrop },
@@ -101,6 +104,7 @@ const struct test winetest_testlist[] =
     { "PathResolve", func_PathResolve },
     { "PIDL", func_PIDL },
     { "RealShellExecuteEx", func_RealShellExecuteEx },
+    { "RegenerateUserEnvironment", func_RegenerateUserEnvironment },
     { "SHAppBarMessage", func_SHAppBarMessage },
     { "SHChangeNotify", func_SHChangeNotify },
     { "SHCreateDataObject", func_SHCreateDataObject },
