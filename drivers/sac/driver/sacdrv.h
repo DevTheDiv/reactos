@@ -522,12 +522,19 @@ typedef struct _SAC_DEVICE_EXTENSION
     KTIMER Timer;
     KDPC Dpc;
     LIST_ENTRY List;
-    PIRP PendingCmdIrp;
+    PIRP PendingCmdIrp; /* Protected by the I/O cancel spin lock. */
 } SAC_DEVICE_EXTENSION, *PSAC_DEVICE_EXTENSION;
 
 //
 // Dispatch Routines
 //
+PIRP
+NTAPI
+SacRemovePendingCmdIrp(
+    IN PSAC_DEVICE_EXTENSION DeviceExtension,
+    IN PFILE_OBJECT FileObject OPTIONAL
+);
+
 NTSTATUS
 NTAPI
 Dispatch(

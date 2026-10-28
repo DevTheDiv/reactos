@@ -41,6 +41,8 @@
 // Blocks (STATUS_PENDING) until the SAC console's "cmd" command is typed by
 // the user, at which point it completes. Only one caller may have this
 // request outstanding at a time. No input/output.
+// The request supports I/O cancellation. Cleanup of its owning file object
+// cancels it; cleanup of a different file object does not affect the waiter.
 //
 #define IOCTL_SAC_WAIT_CMD_REQUEST \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)

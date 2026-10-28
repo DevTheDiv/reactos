@@ -14,6 +14,47 @@
 
 /* FUNCTIONS ******************************************************************/
 
+/* PendingCmdIrp and its cancel routine are protected by the I/O cancel lock.
+ * Remove ownership before releasing that lock; complete outside the lock. */
+PIRP
+NTAPI
+SacRemovePendingCmdIrp(IN PSAC_DEVICE_EXTENSION DeviceExtension,
+                       IN PFILE_OBJECT FileObject OPTIONAL)
+{
+    PIRP Irp;
+    KIRQL OldIrql;
+
+    IoAcquireCancelSpinLock(&OldIrql);
+    Irp = DeviceExtension->PendingCmdIrp;
+    if (Irp && (!FileObject ||
+                IoGetCurrentIrpStackLocation(Irp)->FileObject == FileObject))
+    {
+        IoSetCancelRoutine(Irp, NULL);
+        DeviceExtension->PendingCmdIrp = NULL;
+    }
+    else
+    {
+        Irp = NULL;
+    }
+    IoReleaseCancelSpinLock(OldIrql);
+    return Irp;
+}
+
+static VOID
+NTAPI
+SacCancelCmdIrp(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp)
+{
+    PSAC_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+
+    ASSERT(DeviceExtension->PendingCmdIrp == Irp);
+    DeviceExtension->PendingCmdIrp = NULL;
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
 NTSTATUS
 NTAPI
 DispatchCreate(IN PSAC_DEVICE_EXTENSION DeviceExtension,
@@ -60,20 +101,29 @@ DispatchDeviceControl(IN PDEVICE_OBJECT DeviceObject,
     /* This one completes later, from DoCmdCommand -- handle it separately */
     if (IoControlCode == IOCTL_SAC_WAIT_CMD_REQUEST)
     {
-        KeAcquireSpinLock(&DeviceExtension->Lock, &OldIrql);
-        if (DeviceExtension->PendingCmdIrp)
+        IoAcquireCancelSpinLock(&OldIrql);
+        if (Irp->Cancel)
+        {
+            Status = STATUS_CANCELLED;
+        }
+        else if (DeviceExtension->PendingCmdIrp)
         {
             /* Only one helper can wait at a time */
-            KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
-            Irp->IoStatus.Status = STATUS_DEVICE_BUSY;
-            IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            return STATUS_DEVICE_BUSY;
+            Status = STATUS_DEVICE_BUSY;
+        }
+        else
+        {
+            IoMarkIrpPending(Irp);
+            IoSetCancelRoutine(Irp, SacCancelCmdIrp);
+            DeviceExtension->PendingCmdIrp = Irp;
+            IoReleaseCancelSpinLock(OldIrql);
+            return STATUS_PENDING;
         }
 
-        IoMarkIrpPending(Irp);
-        DeviceExtension->PendingCmdIrp = Irp;
-        KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
-        return STATUS_PENDING;
+        IoReleaseCancelSpinLock(OldIrql);
+        Irp->IoStatus.Status = Status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
     }
 
     switch (IoControlCode)
@@ -189,6 +239,21 @@ Dispatch(IN PDEVICE_OBJECT DeviceObject,
         case IRP_MJ_CLOSE:
             Status = DispatchClose(DeviceExtension, Irp);
             break;
+
+        case IRP_MJ_CLEANUP:
+        {
+            PIRP PendingIrp = SacRemovePendingCmdIrp(DeviceExtension,
+                                                     IrpSp->FileObject);
+            if (PendingIrp)
+            {
+                PendingIrp->IoStatus.Status = STATUS_CANCELLED;
+                PendingIrp->IoStatus.Information = 0;
+                IoCompleteRequest(PendingIrp, IO_NO_INCREMENT);
+            }
+            Irp->IoStatus.Information = 0;
+            Status = STATUS_SUCCESS;
+            break;
+        }
 
         default:
             Status = STATUS_NOT_IMPLEMENTED;

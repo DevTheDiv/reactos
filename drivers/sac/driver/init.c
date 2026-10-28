@@ -23,6 +23,7 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     UNICODE_STRING DriverName;
     PDEVICE_OBJECT DeviceObject;
     PSAC_DEVICE_EXTENSION DeviceExtension;
+    ULONG Index;
     PAGED_CODE();
     SAC_DBG(SAC_DBG_ENTRY_EXIT, "Entering.\n");
 
@@ -53,9 +54,8 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
             GlobalDeviceExtension = DeviceExtension;
 
             /* Initialize the driver object */
-            RtlFillMemoryUlong(DriverObject->MajorFunction,
-                               RTL_NUMBER_OF(DriverObject->MajorFunction),
-                               (ULONG_PTR)Dispatch);
+            for (Index = 0; Index < RTL_NUMBER_OF(DriverObject->MajorFunction); ++Index)
+                DriverObject->MajorFunction[Index] = Dispatch;
             DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
             DriverObject->MajorFunction[IRP_MJ_SHUTDOWN] = DispatchShutdownControl;
             DriverObject->FastIoDispatch = NULL;

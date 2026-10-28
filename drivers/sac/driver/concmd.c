@@ -492,7 +492,6 @@ DoCmdCommand(IN PCHAR InputString)
 {
     PSAC_DEVICE_EXTENSION DeviceExtension;
     PIRP Irp;
-    KIRQL OldIrql;
 
     SAC_DBG(SAC_DBG_ENTRY_EXIT, "Entering\n");
     UNREFERENCED_PARAMETER(InputString);
@@ -501,10 +500,7 @@ DoCmdCommand(IN PCHAR InputString)
     if (!DeviceExtension) return;
 
     /* Is a usermode cmd helper currently waiting for a request? */
-    KeAcquireSpinLock(&DeviceExtension->Lock, &OldIrql);
-    Irp = DeviceExtension->PendingCmdIrp;
-    DeviceExtension->PendingCmdIrp = NULL;
-    KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
+    Irp = SacRemovePendingCmdIrp(DeviceExtension, NULL);
 
     if (Irp)
     {
