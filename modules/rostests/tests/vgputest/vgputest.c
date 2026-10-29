@@ -13,6 +13,46 @@ static HANDLE OpenProbe(void)
                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 }
 
+static int CheckVenus(BOOL Required)
+{
+    VGPU_VENUS_INFO Info;
+    DWORD Bytes = 0, Error, i;
+    HANDLE Device = OpenProbe();
+    BOOL Success;
+    if (Device == INVALID_HANDLE_VALUE) return 1;
+    Success = DeviceIoControl(Device, IOCTL_VGPU_QUERY_VENUS, NULL, 0,
+                              &Info, sizeof(Info) - 1, &Bytes, NULL);
+    Error = GetLastError();
+    if (Success || Error != ERROR_INSUFFICIENT_BUFFER)
+    { puts("FAIL: short Venus snapshot accepted/wrong error"); CloseHandle(Device); return 1; }
+    Success = DeviceIoControl(Device, IOCTL_VGPU_QUERY_VENUS, NULL, 0,
+                              &Info, sizeof(Info), &Bytes, NULL);
+    CloseHandle(Device);
+    if (!Success || Bytes != sizeof(Info) || Info.Size != sizeof(Info) ||
+        Info.Version != VGPU_VENUS_VERSION || Info.CapsetCount > VGPU_MAX_CAPSETS)
+    { puts("FAIL: Venus diagnostic schema/read"); return 1; }
+    printf("venus gate=%lu status=%08lx capsets=%lu/%lu commands=%lu context_ack_pairs=%lu last=%lx/%lx\n",
+           Info.Gate, Info.Status, Info.CapsetCount, Info.ReportedCapsets,
+           Info.CompletedRequests, Info.ContextAckPairs, Info.LastCommand, Info.LastResponse);
+    for (i = 0; i < Info.CapsetCount; ++i)
+        printf("capset %lu: id=%lu max_version=%lu max_size=%lu data_bytes=%lu\n", i,
+               Info.Capsets[i].Id, Info.Capsets[i].MaxVersion, Info.Capsets[i].MaxSize, Info.Capsets[i].DataBytes);
+    printf("venus data_bytes=%lu prefix=", Info.VenusDataBytes);
+    if (Info.VenusPrefixBytes > VGPU_VENUS_PREFIX_BYTES) return 1;
+    for (i = 0; i < Info.VenusPrefixBytes; ++i) printf("%02x", Info.VenusPrefix[i]);
+    puts("");
+    if (Info.Gate == VGPU_VENUS_NOT_PROBED || Info.Gate == VGPU_VENUS_FAILED ||
+        (Info.Status && Info.Status != 0xc00000bb))
+    { puts("FAIL: Venus transport probe"); return 1; }
+    if (Required && (Info.Status || Info.Gate != VGPU_VENUS_CONTEXT_ACK || Info.ContextAckPairs != 8))
+    { puts("FAIL: Venus prerequisites/context acknowledgements unavailable"); return 1; }
+    if (Info.Gate == VGPU_VENUS_CONTEXT_ACK)
+        puts("PASS: Venus capset and context command acknowledgements; Vulkan execution remains unverified");
+    else
+        puts("SKIP: host does not provide the Venus prerequisites; Vulkan unavailable");
+    return 0;
+}
+
 static int Install(const char *Path, DWORD Cycles, BOOL Regression)
 {
     typedef BOOL (WINAPI *UPDATE)(HWND, LPCWSTR, LPCWSTR, DWORD, PBOOL);
@@ -79,6 +119,7 @@ int main(int argc, char **argv)
     HANDLE Device;
     DWORD Bytes, Error, i, Count = 1000;
     BOOL Success;
+    BOOL RequireVenus = FALSE;
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 3 && !strcmp(argv[1], "--install")) return Install(argv[2], 1, FALSE);
     if ((argc == 3 || argc == 4) && !strcmp(argv[1], "--install-test"))
@@ -87,7 +128,8 @@ int main(int argc, char **argv)
         if (!Count || Count > 1000) return 1;
         return Install(argv[2], Count, TRUE);
     }
-    if (argc == 2) Count = strtoul(argv[1], NULL, 10);
+    if (argc == 2 && !strcmp(argv[1], "--venus")) RequireVenus = TRUE;
+    else if (argc == 2) Count = strtoul(argv[1], NULL, 10);
     if (!Count || Count > 100000) return 1;
     Device = OpenProbe();
     if (Device == INVALID_HANDLE_VALUE)
@@ -138,5 +180,5 @@ int main(int argc, char **argv)
         { printf("FAIL: read/open/close cycle %lu\n", i); return 1; }
     }
     printf("PASS: fenced GET_DISPLAY_INFO; %lu diagnostic open/read/close cycles; invalid requests rejected\n", Count);
-    return 0;
+    return CheckVenus(RequireVenus);
 }

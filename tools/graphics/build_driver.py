@@ -89,8 +89,11 @@ def main():
         ring_test = root / "modules/rostests/tests/virtioringtest/virtioringtest.c"
         ring_objects = compile_group(library_dir, "virtio", [ring_test])
         run([compiler] + ring_objects + ["-o", out / "virtioringtest.exe", "-lntdll"], out)
+        protocol_test = root / "modules/rostests/tests/vgpuprotocoltest/vgpuprotocoltest.c"
+        run([compiler, "-O2", "-Wall", "-Wextra", "-Werror", protocol_test,
+             "-o", out / "vgpuprotocoltest.exe"], out)
     sources += [test, driver / "vgpudiag.rc", driver / "vgpudiag.inf",
-                root / "sdk/include/reactos/drivers/vgpu_diag.h"]
+                root / "sdk/include/reactos/drivers/vgpu_diag.h", driver / "protocol.h", protocol_test]
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     manifest = {"source_root": str(root), "generated_build": str(build),
                 "generated_build_source": cache_source,

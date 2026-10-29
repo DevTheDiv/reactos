@@ -1,0 +1,4 @@
+add_executable(vgpuprotocoltest vgpuprotocoltest.c)
+set_module_type(vgpuprotocoltest win32cui)
+add_importlibs(vgpuprotocoltest msvcrt kernel32)
+add_rostests_file(TARGET vgpuprotocoltest)

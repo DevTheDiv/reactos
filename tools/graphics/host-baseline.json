@@ -19,5 +19,15 @@
   "host_external_memory_fd_advertised": false,
   "host_external_memory_win32_advertised": true,
   "raw_report": "C:/ReactOS/vm/graphics-host-report.json",
-  "next_gate": "Create a guest Venus context and render/read back a verified off-screen image; initialization alone does not establish rendering support."
+  "next_gate": "Provide a working Venus renderer host backend, then validate blob-resource lifetimes, context execution and Vulkan image readback.",
+  "measurement_scope": "Original paused host startup; active guest follow-up recorded separately below",
+  "active_guest_followup": {
+    "measured_at_utc": "2026-10-29T02:46:18Z",
+    "control_2d": "passed",
+    "virgl_capset_metadata_and_payloads": "passed: IDs 1 and 2, 308 and 1408 bytes",
+    "venus_renderer_initialization": "failed: render server support not built into bundled virglrenderer",
+    "guest_venus_context_verified": false,
+    "guest_vulkan_validated": false,
+    "evidence": "drivers/virtio/vgpudiag/README.md#venus-capability-bring-up"
+  }
 }

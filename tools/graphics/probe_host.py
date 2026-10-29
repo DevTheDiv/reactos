@@ -134,7 +134,8 @@ def smoke_qemu(qemu, venus):
     # Always tear down the child, including on monitor/startup failures.
     device = ("virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=true" if venus
               else "virtio-gpu-pci")
-    result = {"status": "failed", "guest_vulkan_validated": False}
+    result = {"status": "failed", "guest_vulkan_validated": False,
+              "guest_cpu_executed": False, "renderer_runtime_validated": False}
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)

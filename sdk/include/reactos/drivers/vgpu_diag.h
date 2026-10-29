@@ -29,3 +29,32 @@ typedef struct _VGPU_DIAG_INFO
 #define VGPU_STAGE_QUEUE 4
 #define VGPU_STAGE_COMMAND 5
 #define VGPU_STAGE_COMPLETE 6
+
+/* Separate versioned snapshot; the original 432-byte IOCTL stays unchanged. */
+#define IOCTL_VGPU_QUERY_VENUS \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define VGPU_VENUS_VERSION 1
+#define VGPU_MAX_CAPSETS 16
+#define VGPU_VENUS_PREFIX_BYTES 64
+#define VGPU_VENUS_NOT_PROBED 0
+#define VGPU_VENUS_NO_3D 1
+#define VGPU_VENUS_NO_CAPSET 2
+#define VGPU_VENUS_MISSING_FEATURES 3
+#define VGPU_VENUS_CAPSET_READY 4
+#define VGPU_VENUS_CONTEXT_ACK 5
+#define VGPU_VENUS_FAILED 6
+
+typedef struct _VGPU_CAPSET_INFO
+{
+    ULONG Id, MaxVersion, MaxSize, DataBytes;
+} VGPU_CAPSET_INFO;
+
+typedef struct _VGPU_VENUS_INFO
+{
+    ULONG Size, Version, Gate, Status;
+    ULONG ReportedCapsets, CapsetCount, CompletedRequests;
+    ULONG LastCommand, LastResponse, ContextAckPairs;
+    ULONG VenusDataBytes, VenusPrefixBytes;
+    VGPU_CAPSET_INFO Capsets[VGPU_MAX_CAPSETS];
+    UCHAR VenusPrefix[VGPU_VENUS_PREFIX_BYTES];
+} VGPU_VENUS_INFO;

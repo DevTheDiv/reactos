@@ -1,9 +1,10 @@
 # Experimental virtio-gpu transport diagnostic
 
 `vgpudiag.sys` binds modern PCI device `1af4:1050` as a System device alongside
-the existing display adapter. It negotiates only VERSION_1, creates a split
-control queue, submits one fenced GET_DISPLAY_INFO request, caches the result,
-then resets the device and releases the queue. It exposes a read-only diagnostic
+the existing display adapter. It negotiates VERSION_1 and advertised
+VIRGL/RESOURCE_BLOB/CONTEXT_INIT features, creates a split control queue,
+submits fenced display and capability requests, caches the results,
+then resets the device and releases the queue. It exposes read-only diagnostic
 snapshot through `\\.\VgpuDiag`; there is no rendering or display-driver API.
 
 The i386 prototype polls with bounded waits, masks legacy INTx, limits BAR and
@@ -108,3 +109,68 @@ the reboot result.
 
 This establishes basic guest transport. Venus contexts, Vulkan execution,
 resource lifetime, window presentation, and DXVK rendering remain unimplemented.
+
+## Venus capability bring-up
+
+The original diagnostic IOCTL stays version 1/432 bytes. A separate
+`IOCTL_VGPU_QUERY_VENUS` returns a version 1/368-byte snapshot with capset
+metadata, transferred payload sizes, a bounded Venus payload prefix, probe
+status, last request/reply types, and context-command acknowledgement counts.
+Neither IOCTL accepts user GPU commands or creates persistent user resources.
+
+The probe enumerates at most 16 capsets and fetches payloads up to 2048 bytes
+through one 4-KiB DMA packet. Larger payloads are skipped, not used for
+allocation. Each command validates response length/type, flags and its unique
+64-bit fence. Each wait is bounded by five seconds and the capability/context
+phase has a 30-second overall deadline. Timeout ends submission; reset must
+complete before the outstanding DMA memory is freed. Both snapshots are
+published together under the diagnostic lock.
+
+If capset 4 (Venus), its payload, and all required negotiated features are
+present, the experimental path attempts eight context create/destroy pairs.
+**That path has not yet run successfully on this host.** Even successful
+command acknowledgements would not establish a working renderer: QEMU's
+`virgl_cmd_context_create` currently ignores the renderer's return value.
+An actual Venus/Vulkan protocol operation and verified image readback remain
+required. No Vulkan ICD or blob-resource/mapping interface exists yet.
+
+`vgputest 1000` checks basic transport and reports an explicit Venus SKIP when
+the backend lacks prerequisites. `vgputest --venus` instead returns failure
+unless the Venus payload and eight context acknowledgement pairs are present;
+it explicitly reports Vulkan execution as unverified even in that case.
+`vgpuprotocoltest` exercises the same reply validator used by the driver:
+17 layout, short/oversized response, wrong type/flags, full-width fence, and
+device-error cases. It passed on the host and inside ReactOS.
+
+### Active guest measurements (2026-10-29 UTC)
+
+All tests used i386 ReactOS, QEMU 11.1.0, WHPX, one vCPU, 2048 MiB, the primary
+standard VGA, separate disposable overlays, and the targeted source build.
+
+| Device beside VGA | Actual guest result |
+| --- | --- |
+| `virtio-gpu-pci` | Display request passes; gate 1/no 3D; normal diagnostic succeeds and strict Venus test fails as expected. |
+| `virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=false` with `-display egl-headless` | Display request passes (1280x800); four fenced capability requests succeed: capset 1 version 1/308 bytes and capset 2 version 2/1408 bytes. Gate 2/no Venus capset; strict Venus test fails as expected. |
+| `virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=true` with `-display egl-headless` | First display command times out, reset succeeds; QEMU stderr identifies renderer initialization failure before capsets can be queried. |
+
+The failure text is `Render server support was not enabled in virglrenderer`,
+followed by `failed to initialize venus renderer` and
+`virgl could not be initialized: -1`. Paused host startup did not exercise
+this lazy initialization path. Enabling the `venus` QEMU property is therefore
+insufficient on the installed Windows package. A compatible host renderer
+build (including its Windows memory-sharing path), or a Linux reference host,
+is the next gate before claiming guest Venus context support.
+
+Both successful configurations also passed 1,000 diagnostic cycles, all 17
+protocol cases, and 264,096 ring completions. Final SYS SHA-256:
+`57d9032bc194d3125569e8cd3e01bc500c202b02b61f03788dcdf3fd7fb0e8f7`.
+Local evidence is under `C:\ReactOS\vm`: `graphics-venus-control-final-result.log`,
+`graphics-virgl-final-result.log`, `graphics-venus-failed-kernel.log`,
+`graphics-venus.err`, `graphics-venus/` (manifest/build), and the matching
+`graphics-venus-control.qcow2`, `graphics-virgl-test.qcow2` overlays. The failed
+Venus run used the preceding probe build; its failure occurs before the final
+payload-query changes are reached. This was not a clean OS build.
+
+References: [Virtio GPU wire definitions](https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_gpu.h),
+[QEMU renderer/context code](https://github.com/qemu/qemu/blob/master/hw/display/virtio-gpu-virgl.c),
+and [Mesa Venus requirements](https://docs.mesa3d.org/drivers/venus.html).

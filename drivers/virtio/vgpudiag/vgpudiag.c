@@ -11,23 +11,12 @@
 #include "VirtIO.h"
 #include "virtio_pci_common.h"
 #include "kdebugprint.h"
+#include "protocol.h"
 
 #define VGPU_TAG 'pgVV'
 #define VGPU_MAX_BAR (1024 * 1024)
 #define VGPU_MAX_DMA (256 * 1024)
 #define VGPU_INTX_DISABLE 0x400
-#define VGPU_GET_DISPLAY_INFO 0x0100
-#define VGPU_RESP_DISPLAY_INFO 0x1101
-#define VGPU_FLAG_FENCE 1
-
-typedef struct _GPU_HEADER
-{
-    ULONG Type, Flags;
-    ULONGLONG Fence;
-    ULONG Context;
-    UCHAR Ring, Padding[3];
-} GPU_HEADER;
-
 typedef struct _GPU_RESPONSE
 {
     GPU_HEADER Header;
@@ -36,6 +25,10 @@ typedef struct _GPU_RESPONSE
 C_ASSERT(sizeof(GPU_HEADER) == 24);
 C_ASSERT(sizeof(GPU_RESPONSE) == 408);
 C_ASSERT(sizeof(VGPU_DIAG_INFO) == 432);
+C_ASSERT(sizeof(GPU_CAPSET_REQUEST) == 32);
+C_ASSERT(sizeof(GPU_CAPSET_RESPONSE) == 40);
+C_ASSERT(sizeof(GPU_CONTEXT_REQUEST) == 96);
+C_ASSERT(sizeof(VGPU_VENUS_INFO) == 368);
 
 typedef struct _GPU_BAR
 {
@@ -50,6 +43,7 @@ typedef struct _GPU_EXTENSION
     IO_REMOVE_LOCK RemoveLock;
     KSPIN_LOCK InfoLock;
     VGPU_DIAG_INFO Info;
+    VGPU_VENUS_INFO Venus, ProbeVenus;
     BUS_INTERFACE_STANDARD Bus;
     PCI_COMMON_CONFIG Pci;
     GPU_BAR Bars[PCI_TYPE0_ADDRESSES];
@@ -58,6 +52,8 @@ typedef struct _GPU_EXTENSION
     USHORT OriginalCommand;
     BOOLEAN CommandChanged;
     BOOLEAN DmaQuarantined;
+    ULONGLONG NextFence;
+    ULONGLONG VenusDeadline;
 } GPU_EXTENSION;
 
 static LONG DevicePresent;
@@ -261,26 +257,162 @@ static NTSTATUS GpuReset(GPU_EXTENSION *Ext)
     return STATUS_IO_TIMEOUT;
 }
 
+/* One in-flight packet. Never reuse DMA after a timeout until device reset. */
+static NTSTATUS GpuCommand(GPU_EXTENSION *Ext, struct virtqueue *Queue,
+                           ULONG RequestBytes, ULONG ReplyBytes, ULONG ReplyType,
+                           BOOLEAN TrackVenus)
+{
+    GPU_HEADER *Request = Ext->Packet;
+    GPU_HEADER *Reply = (GPU_HEADER *)((PUCHAR)Ext->Packet + VGPU_RESPONSE_OFFSET);
+    struct scatterlist Buffers[2];
+    ULONGLONG Deadline;
+    unsigned int Used = 0;
+    PVOID Token = NULL;
+    int Result;
+    if (RequestBytes < sizeof(*Request) || ReplyBytes < sizeof(*Reply) ||
+        RequestBytes > VGPU_RESPONSE_OFFSET || ReplyBytes > PAGE_SIZE - VGPU_RESPONSE_OFFSET)
+        return STATUS_INVALID_BUFFER_SIZE;
+    Deadline = KeQueryInterruptTime();
+    if (TrackVenus && Deadline >= Ext->VenusDeadline) return STATUS_IO_TIMEOUT;
+    Deadline += 50000000;
+    if (TrackVenus && Deadline > Ext->VenusDeadline) Deadline = Ext->VenusDeadline;
+    Request->Flags = VGPU_FLAG_FENCE;
+    Request->Fence = ++Ext->NextFence;
+    RtlZeroMemory(Reply, ReplyBytes);
+    if (TrackVenus)
+    {
+        Ext->ProbeVenus.LastCommand = Request->Type;
+        Ext->ProbeVenus.LastResponse = 0;
+    }
+    Buffers[0].physAddr = MmGetPhysicalAddress(Request);
+    Buffers[0].length = RequestBytes;
+    Buffers[1].physAddr = MmGetPhysicalAddress(Reply);
+    Buffers[1].length = ReplyBytes;
+    if (virtqueue_add_buf(Queue, Buffers, 1, 1, Ext, NULL, 0) < 0)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    KeMemoryBarrier();
+    virtqueue_kick(Queue);
+    do
+    {
+        Token = virtqueue_get_buf(Queue, &Used);
+        if (Token) break;
+        GpuSleep(Ext, 1);
+    } while (KeQueryInterruptTime() < Deadline);
+    if (!Token) return STATUS_IO_TIMEOUT;
+    KeMemoryBarrier();
+    if (Token != Ext || Used > ReplyBytes) return STATUS_DEVICE_PROTOCOL_ERROR;
+    if (TrackVenus && Used >= sizeof(*Reply)) Ext->ProbeVenus.LastResponse = Reply->Type;
+    Result = VgpuCheckReply(Reply, Used, ReplyBytes, ReplyType, Request->Fence);
+    if (Result == VGPU_REPLY_DEVICE_ERROR) return STATUS_NOT_SUPPORTED;
+    if (Result != VGPU_REPLY_OK) return STATUS_DEVICE_PROTOCOL_ERROR;
+    if (TrackVenus) ++Ext->ProbeVenus.CompletedRequests;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS GpuProbeVenus(GPU_EXTENSION *Ext, struct virtqueue *Queue, ULONGLONG Features)
+{
+    VGPU_VENUS_INFO *Info = &Ext->ProbeVenus;
+    GPU_CAPSET_REQUEST *Request = Ext->Packet;
+    GPU_CAPSET_RESPONSE *Reply = (GPU_CAPSET_RESPONSE *)((PUCHAR)Ext->Packet + VGPU_RESPONSE_OFFSET);
+    GPU_CONTEXT_REQUEST *Context = Ext->Packet;
+    NTSTATUS Status;
+    ULONG i, j, Venus = MAXULONG;
+    Ext->VenusDeadline = KeQueryInterruptTime() + 300000000;
+    Info->Gate = VGPU_VENUS_NO_3D;
+    if (!(Features & VGPU_FEATURE_VIRGL)) return STATUS_NOT_SUPPORTED;
+    Info->Gate = VGPU_VENUS_FAILED;
+    if (!Ext->Virtio.config || Ext->Virtio.config_len < 16)
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    /* A single atomic 32-bit configuration field needs no generation retry. */
+    virtio_get_config(&Ext->Virtio, 12, &Info->ReportedCapsets, sizeof(ULONG));
+    if (Info->ReportedCapsets > VGPU_MAX_CAPSETS) return STATUS_NOT_SUPPORTED;
+    for (i = 0; i < Info->ReportedCapsets; ++i)
+    {
+        RtlZeroMemory(Request, VGPU_RESPONSE_OFFSET);
+        Request->Header.Type = VGPU_GET_CAPSET_INFO;
+        Request->IndexOrId = i;
+        Status = GpuCommand(Ext, Queue, sizeof(*Request), sizeof(*Reply), VGPU_RESP_CAPSET_INFO, TRUE);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (!Reply->Id || !Reply->MaxSize) return STATUS_DEVICE_PROTOCOL_ERROR;
+        for (j = 0; j < i; ++j)
+            if (Info->Capsets[j].Id == Reply->Id) return STATUS_DEVICE_PROTOCOL_ERROR;
+        Info->Capsets[i].Id = Reply->Id;
+        Info->Capsets[i].MaxVersion = Reply->MaxVersion;
+        Info->Capsets[i].MaxSize = Reply->MaxSize;
+        ++Info->CapsetCount;
+        if (Reply->Id == VGPU_CAPSET_VENUS) Venus = i;
+    }
+    /* Exercise the same bounded payload path with available non-Venus capsets.
+     * Large unrelated payloads are skipped, never used as allocation sizes. */
+    for (i = 0; i < Info->CapsetCount; ++i)
+    {
+        if (Info->Capsets[i].MaxSize > VGPU_MAX_VENUS_DATA) continue;
+        RtlZeroMemory(Request, VGPU_RESPONSE_OFFSET);
+        Request->Header.Type = VGPU_GET_CAPSET;
+        Request->IndexOrId = Info->Capsets[i].Id;
+        Request->Version = Info->Capsets[i].MaxVersion;
+        Status = GpuCommand(Ext, Queue, sizeof(*Request),
+                            sizeof(GPU_HEADER) + Info->Capsets[i].MaxSize, VGPU_RESP_CAPSET, TRUE);
+        if (!NT_SUCCESS(Status)) return Status;
+        Info->Capsets[i].DataBytes = Info->Capsets[i].MaxSize;
+        if (i == Venus)
+        {
+            Info->VenusDataBytes = Info->Capsets[i].DataBytes;
+            Info->VenusPrefixBytes = min(Info->VenusDataBytes, VGPU_VENUS_PREFIX_BYTES);
+            RtlCopyMemory(Info->VenusPrefix, (PUCHAR)Reply + sizeof(GPU_HEADER), Info->VenusPrefixBytes);
+        }
+    }
+    Info->Gate = VGPU_VENUS_NO_CAPSET;
+    if (Venus == MAXULONG) return STATUS_NOT_SUPPORTED;
+    Info->Gate = VGPU_VENUS_MISSING_FEATURES;
+    if ((Features & VGPU_VENUS_FEATURES) != VGPU_VENUS_FEATURES) return STATUS_NOT_SUPPORTED;
+    Info->Gate = VGPU_VENUS_FAILED;
+    if (!Info->VenusDataBytes) return STATUS_NOT_SUPPORTED;
+    Info->Gate = VGPU_VENUS_CAPSET_READY;
+    for (i = 0; i < VGPU_CONTEXT_CYCLES; ++i)
+    {
+        RtlZeroMemory(Context, VGPU_RESPONSE_OFFSET);
+        Context->Header.Type = VGPU_CTX_CREATE;
+        Context->Header.Context = i + 1;
+        Context->Init = VGPU_CAPSET_VENUS;
+        Context->NameLength = 9;
+        RtlCopyMemory(Context->Name, "vgpu-test", 9);
+        Status = GpuCommand(Ext, Queue, sizeof(*Context), sizeof(GPU_HEADER), VGPU_RESP_NODATA, TRUE);
+        if (!NT_SUCCESS(Status)) return Status;
+        RtlZeroMemory(Context, VGPU_RESPONSE_OFFSET);
+        Context->Header.Type = VGPU_CTX_DESTROY;
+        Context->Header.Context = i + 1;
+        Status = GpuCommand(Ext, Queue, sizeof(GPU_HEADER), sizeof(GPU_HEADER), VGPU_RESP_NODATA, TRUE);
+        if (!NT_SUCCESS(Status)) return Status;
+        ++Info->ContextAckPairs;
+    }
+    /* QEMU may ignore a renderer context-create error. These are ACKs only. */
+    Info->Gate = VGPU_VENUS_CONTEXT_ACK;
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
 {
     NTSTATUS Status, ResetStatus = STATUS_SUCCESS;
     VGPU_DIAG_INFO Info = {0};
     VirtIODevice *Device = &Ext->Virtio;
     struct virtqueue *Queue = NULL;
-    struct scatterlist Buffers[2];
     GPU_HEADER *Request;
     GPU_RESPONSE *Response;
-    ULONGLONG Features, Deadline;
+    ULONGLONG Features;
     USHORT Command, Entries;
     ULONG RingSize, HeapSize, i;
-    unsigned int Used = 0;
-    PVOID Token = NULL;
     KIRQL Irql;
 
     if (Ext->DmaQuarantined) return STATUS_DEVICE_HARDWARE_ERROR;
 
     Info.Size = sizeof(Info);
     Info.Version = VGPU_DIAG_VERSION;
+    RtlZeroMemory(&Ext->ProbeVenus, sizeof(Ext->ProbeVenus));
+    Ext->ProbeVenus.Size = sizeof(Ext->ProbeVenus);
+    Ext->ProbeVenus.Version = VGPU_VENUS_VERSION;
+    Ext->ProbeVenus.Status = STATUS_DEVICE_NOT_READY;
+    Ext->NextFence = 0;
     Status = GpuGetBus(Ext);
     if (!NT_SUCCESS(Status)) goto Done;
     Info.Stage = VGPU_STAGE_BUS;
@@ -322,10 +454,12 @@ static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
     Info.HostFeaturesHigh = (ULONG)(Features >> 32);
     if (!(Features & (1ULL << VIRTIO_F_VERSION_1)))
     { Status = STATUS_NOT_SUPPORTED; goto Done; }
-    Features = 1ULL << VIRTIO_F_VERSION_1;
+    Features = (1ULL << VIRTIO_F_VERSION_1) | (Features & VGPU_VENUS_FEATURES);
+    if (!(Features & VGPU_FEATURE_VIRGL)) Features &= ~VGPU_FEATURE_CONTEXT_INIT;
     Status = virtio_set_features(Device, Features);
     if (!NT_SUCCESS(Status)) goto Done;
     Info.GuestFeaturesHigh = (ULONG)(Features >> 32);
+    Info.GuestFeaturesLow = (ULONG)Features;
     Info.Stage = VGPU_STAGE_FEATURES;
 
     Status = virtio_query_queue_allocation(Device, 0, &Entries, &RingSize, &HeapSize);
@@ -340,33 +474,12 @@ static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
     if (!Ext->Packet) { Status = STATUS_INSUFFICIENT_RESOURCES; goto Done; }
     RtlZeroMemory(Ext->Packet, PAGE_SIZE);
     Request = Ext->Packet;
-    Response = (GPU_RESPONSE *)((PUCHAR)Ext->Packet + 64);
+    Response = (GPU_RESPONSE *)((PUCHAR)Ext->Packet + VGPU_RESPONSE_OFFSET);
     Request->Type = VGPU_GET_DISPLAY_INFO;
-    Request->Flags = VGPU_FLAG_FENCE;
-    Request->Fence = 1;
-    Buffers[0].physAddr = MmGetPhysicalAddress(Request);
-    Buffers[0].length = sizeof(*Request);
-    Buffers[1].physAddr = MmGetPhysicalAddress(Response);
-    Buffers[1].length = sizeof(*Response);
-    if (virtqueue_add_buf(Queue, Buffers, 1, 1, Ext, NULL, 0) < 0)
-    { Status = STATUS_INSUFFICIENT_RESOURCES; goto Done; }
     virtio_device_ready(Device);
     Info.Stage = VGPU_STAGE_COMMAND;
-    KeMemoryBarrier();
-    virtqueue_kick(Queue);
-    Deadline = KeQueryInterruptTime() + 50000000;
-    do
-    {
-        Token = virtqueue_get_buf(Queue, &Used);
-        if (Token) break;
-        GpuSleep(Ext, 1);
-    } while (KeQueryInterruptTime() < Deadline);
-    if (!Token) { Status = STATUS_IO_TIMEOUT; goto Done; }
-    KeMemoryBarrier();
-    if (Token != Ext || Used != sizeof(*Response) ||
-        Response->Header.Type != VGPU_RESP_DISPLAY_INFO ||
-        !(Response->Header.Flags & VGPU_FLAG_FENCE) || Response->Header.Fence != 1)
-    { Status = STATUS_DEVICE_PROTOCOL_ERROR; goto Done; }
+    Status = GpuCommand(Ext, Queue, sizeof(*Request), sizeof(*Response), VGPU_RESP_DISPLAY_INFO, FALSE);
+    if (!NT_SUCCESS(Status)) goto Done;
     for (i = 0; i < VGPU_DIAG_MAX_SCANOUTS; ++i)
     {
         if (Response->Scanouts[i].Enabled > 1 ||
@@ -378,6 +491,10 @@ static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
     }
     Info.CompletedRequests = 1;
     Info.Stage = VGPU_STAGE_COMPLETE;
+    Ext->ProbeVenus.Status = GpuProbeVenus(Ext, Queue, Features);
+    DbgPrint("vgpudiag: venus gate=%lu status=%08lx capsets=%lu/%lu commands=%lu context_ack_pairs=%lu last=%lx/%lx\n",
+             Ext->ProbeVenus.Gate, Ext->ProbeVenus.Status, Ext->ProbeVenus.CapsetCount, Ext->ProbeVenus.ReportedCapsets,
+             Ext->ProbeVenus.CompletedRequests, Ext->ProbeVenus.ContextAckPairs, Ext->ProbeVenus.LastCommand, Ext->ProbeVenus.LastResponse);
     Status = STATUS_SUCCESS;
 
 Done:
@@ -420,6 +537,7 @@ Done:
     Info.ResetStatus = ResetStatus;
     KeAcquireSpinLock(&Ext->InfoLock, &Irql);
     Ext->Info = Info;
+    Ext->Venus = Ext->ProbeVenus;
     KeReleaseSpinLock(&Ext->InfoLock, Irql);
     DbgPrint("vgpudiag: stage=%lu status=%08lx reset=%08lx completed=%lu scanouts=%lu flags=%lx\n",
              Info.Stage, Info.Status, Info.ResetStatus, Info.CompletedRequests, Info.EnabledScanouts, Info.Flags);
@@ -482,16 +600,29 @@ static NTSTATUS NTAPI GpuDispatch(PDEVICE_OBJECT Device, PIRP Irp)
     }
     else if (Stack->MajorFunction == IRP_MJ_DEVICE_CONTROL)
     {
+        ULONG Size;
+        PVOID Snapshot;
         Status = STATUS_INVALID_DEVICE_REQUEST;
-        if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_DIAGNOSTICS)
+        if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_DIAGNOSTICS ||
+            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS)
         {
+            if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS)
+            {
+                Snapshot = &Ext->Venus;
+                Size = sizeof(Ext->Venus);
+            }
+            else
+            {
+                Snapshot = &Ext->Info;
+                Size = sizeof(Ext->Info);
+            }
             Status = STATUS_BUFFER_TOO_SMALL;
-            if (Stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(Ext->Info))
+            if (Stack->Parameters.DeviceIoControl.OutputBufferLength >= Size)
             {
                 KeAcquireSpinLock(&Ext->InfoLock, &Irql);
-                RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, &Ext->Info, sizeof(Ext->Info));
+                RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, Snapshot, Size);
                 KeReleaseSpinLock(&Ext->InfoLock, Irql);
-                Irp->IoStatus.Information = sizeof(Ext->Info);
+                Irp->IoStatus.Information = Size;
                 Status = STATUS_SUCCESS;
             }
         }
@@ -532,6 +663,9 @@ static NTSTATUS NTAPI GpuAddDevice(PDRIVER_OBJECT Driver, PDEVICE_OBJECT Pdo)
     Ext->Info.Size = sizeof(Ext->Info);
     Ext->Info.Version = VGPU_DIAG_VERSION;
     Ext->Info.Status = STATUS_DEVICE_NOT_READY;
+    Ext->Venus.Size = sizeof(Ext->Venus);
+    Ext->Venus.Version = VGPU_VENUS_VERSION;
+    Ext->Venus.Status = STATUS_DEVICE_NOT_READY;
     Ext->Lower = IoAttachDeviceToDeviceStack(Device, Pdo);
     if (!Ext->Lower) { Status = STATUS_NO_SUCH_DEVICE; IoDeleteDevice(Device); goto Failed; }
     Status = IoCreateSymbolicLink(&Link, &Name);

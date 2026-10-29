@@ -20,10 +20,12 @@ Its initial results are recorded in [host-baseline.json](tools/graphics/host-bas
   virtio-gpu GL devices, blob memory, hostmem and Venus properties.
 - A diskless 2D control and a diskless Venus-enabled device both initialized,
   exposed PCI `1af4:1050`, answered QMP while paused, and exited cleanly.
-- **No guest Vulkan context was created, no commands were submitted, and no
+- **No guest Vulkan context was verified, no Vulkan commands were submitted, and no
   accelerated image was rendered.** Device initialization is only the first
-  host gate. It does not establish that this Windows virglrenderer build can
-  service Venus resource sharing or contexts.
+  host gate. Active guest testing now confirms a host blocker: the bundled
+  virglrenderer fails lazy Venus initialization because render-server support
+  was not built in. Ordinary VirGL capset discovery/payload transfer succeeds.
+  See [the guest measurements](drivers/virtio/vgpudiag/README.md#venus-capability-bring-up).
 - Host ICDs advertise Win32 external-memory handles, not Linux fd/dma-buf
   extensions. That is normal platform differentiation, not a Windows Vulkan
   failure. Stock Venus documentation specifies Linux/Android interoperability;
@@ -42,9 +44,9 @@ launchers, display configuration and driver installations were not changed.
 | Vulkan definitions | `sdk/include/wine/vulkan*.h`, `sdk/lib/vkd3d/include/vulkan/` | Definitions exist; they do not establish a working loader, ICD or guest Vulkan runtime. |
 | Diagnostics | SAC and `modules/rostests/tests/sacstress/` | Keep an independent serial control path for crashes, cancellation and reset tests. |
 
-No virtio-gpu implementation or usable Vulkan ICD was found in the inspected
-source tree. Start with a small WDM/PnP render device, using the existing virtio
-library; choose its build location when implementing the driver. Add no
+The initial audit found no virtio-gpu implementation or usable Vulkan ICD.
+The experimental WDM/PnP driver now lives in `drivers/virtio/vgpudiag` and uses
+the existing virtio library. A usable Vulkan ICD remains absent. Add no
 placeholder exports that claim successful GPU operations.
 
 ## Architecture boundary
@@ -89,6 +91,12 @@ limits. The missing host context proof remains open. Do not modify the default V
 driver for these experiments. Use a new overlay and add a non-VGA virtio-gpu
 device beside the existing VGA display. A device initialized without a guest
 driver does not count as completing step 1.
+
+Capability bring-up now covers bounded capset enumeration and payload transfer
+in a real VirGL guest. Venus itself is blocked at host renderer initialization;
+the context-command path remains unverified and step 3 is not complete.
+Fix the host baseline, then implement/test resource lifetime and blob mapping
+before connecting a user-mode Vulkan driver.
 
 ## Initial driver constraints
 

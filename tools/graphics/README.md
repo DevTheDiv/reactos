@@ -26,6 +26,10 @@ The probe records:
   device, paused-guest status, PCI device presence and clean QMP shutdown.
 
 Smoke processes have no disk, NIC or serial device and execute no guest code.
+They also do not trigger the GL renderer's lazy initialization. Active guest
+testing subsequently found the installed Windows Venus backend fails at that
+point because render-server support is missing. See the
+[guest measurements](../../drivers/virtio/vgpudiag/README.md#venus-capability-bring-up).
 QEMU uses TCG while paused, so this is not a WHPX/KVM or guest boot test. Each
 child connects to a temporary loopback QMP listener; command/reply handling is
 sequential, waits are bounded, and failed children are killed and reaped.
@@ -51,7 +55,7 @@ python source/tools/graphics/build_driver.py --build-dir C:/ReactOS/integration-
 ```
 
 The helper builds `vgpudiag.sys`, its INF, `vgputest.exe`, and
-`virtioringtest.exe`. It compiles all virtio C sources into a private archive
+`virtioringtest.exe`, and `vgpuprotocoltest.exe`. It compiles all virtio C sources into a private archive
 from the checkout containing the script, even when the supplied build directory
 was configured against another worktree. It does not overwrite that worktree's
 virtio library. `build.log` records commands; `build-manifest.json` records
