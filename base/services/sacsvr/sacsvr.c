@@ -6,6 +6,10 @@
  *              SAC> prompt. Runs as a normal auto-start Windows service.
  */
 
+/* CancelIoEx is Vista+; this build's default _WIN32_WINNT (0x502) hides its
+ * declaration even though kernel32 implements and exports it. */
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
 #include <windows.h>
 #include <stdio.h>
 #include <drivers/sac/sacioctl.h>
@@ -181,8 +185,11 @@ WINAPI
 ServiceMain(DWORD Argc, LPWSTR *Argv)
 {
     HANDLE SacDevice;
+    HANDLE WaitDevice = INVALID_HANDLE_VALUE;
+    OVERLAPPED WaitOverlapped;
+    HANDLE WaitEvents[2];
     SAC_IOCTL_CHANNEL_CREATE CreateRequest;
-    DWORD BytesReturned;
+    DWORD BytesReturned, Error, WaitResult;
 
     UNREFERENCED_PARAMETER(Argc);
     UNREFERENCED_PARAMETER(Argv);
@@ -258,23 +265,81 @@ ServiceMain(DWORD Argc, LPWSTR *Argv)
         return;
     }
 
+    /*
+     * A dedicated overlapped handle for the idle wait only. SacDevice stays
+     * synchronous for channel creation and the pump threads' I/O. Issuing
+     * IOCTL_SAC_WAIT_CMD_REQUEST overlapped lets a SERVICE_CONTROL_STOP/
+     * SHUTDOWN request (delivered on the SCM's own thread, which only sets
+     * ServiceStopEvent) actually interrupt this thread instead of leaving it
+     * blocked until someone types "cmd" -- or, if nobody ever does, forcing
+     * the OS to kill the process outright during shutdown.
+     */
+    WaitDevice = CreateFileW(SAC_DEVICE_PATH,
+                             GENERIC_READ | GENERIC_WRITE,
+                             0,
+                             NULL,
+                             OPEN_EXISTING,
+                             FILE_FLAG_OVERLAPPED,
+                             NULL);
+    if (WaitDevice == INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(SacDevice);
+        ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        ServiceStatus.dwWin32ExitCode = GetLastError();
+        ServiceStatus.dwWaitHint = 0;
+        ServiceStatus.dwCheckPoint = 0;
+        SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
+        return;
+    }
+
+    ZeroMemory(&WaitOverlapped, sizeof(WaitOverlapped));
+    WaitOverlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    WaitEvents[0] = WaitOverlapped.hEvent;
+    WaitEvents[1] = ServiceStopEvent;
+
     ServiceStatus.dwCurrentState = SERVICE_RUNNING;
     ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
     ServiceStatus.dwWaitHint = 0;
     ServiceStatus.dwCheckPoint = 0;
     SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
 
-    while (WaitForSingleObject(ServiceStopEvent, 0) != WAIT_OBJECT_0)
+    for (;;)
     {
-        if (!DeviceIoControl(SacDevice, IOCTL_SAC_WAIT_CMD_REQUEST,
-                             NULL, 0, NULL, 0, &BytesReturned, NULL))
+        if (WaitForSingleObject(ServiceStopEvent, 0) == WAIT_OBJECT_0)
         {
             break;
+        }
+
+        ResetEvent(WaitOverlapped.hEvent);
+        if (!DeviceIoControl(WaitDevice, IOCTL_SAC_WAIT_CMD_REQUEST,
+                             NULL, 0, NULL, 0, &BytesReturned, &WaitOverlapped))
+        {
+            Error = GetLastError();
+            if (Error != ERROR_IO_PENDING)
+            {
+                break;
+            }
+
+            WaitResult = WaitForMultipleObjects(2, WaitEvents, FALSE, INFINITE);
+            if (WaitResult == WAIT_OBJECT_0 + 1)
+            {
+                /* Stop requested while idle at the SAC prompt */
+                CancelIoEx(WaitDevice, &WaitOverlapped);
+                WaitForSingleObject(WaitOverlapped.hEvent, 2000);
+                break;
+            }
+
+            if (!GetOverlappedResult(WaitDevice, &WaitOverlapped, &BytesReturned, FALSE))
+            {
+                break;
+            }
         }
 
         RunCmdSession(SacDevice);
     }
 
+    CloseHandle(WaitOverlapped.hEvent);
+    CloseHandle(WaitDevice);
     CloseHandle(SacDevice);
     ServiceStatus.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
