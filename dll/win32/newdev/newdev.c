@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 #include <winnls.h>
+#include <cfgmgr32.h>
 
 /* Global variables */
 HINSTANCE hDllInstance;
@@ -45,7 +46,7 @@ UpdateDriverForPlugAndPlayDevicesW(
     IN DWORD InstallFlags,
     OUT PBOOL bRebootRequired OPTIONAL)
 {
-    DEVINSTDATA DevInstData;
+    DEVINSTDATA DevInstData = {0};
     SP_DEVINSTALL_PARAMS InstallParams;
     DWORD i;
     LPWSTR Buffer = NULL;
@@ -55,6 +56,9 @@ UpdateDriverForPlugAndPlayDevicesW(
     BOOL FoundHardwareId, FoundAtLeastOneDevice = FALSE;
     BOOL RebootRequired = FALSE;
     BOOL ret = FALSE;
+    DWORD InstallError = ERROR_NO_SUCH_DEVINST, LastError, Attributes;
+    ULONG DevNodeStatus, DevNodeProblem;
+    CONFIGRET ConfigRet;
 
     DevInstData.hDevInfo = INVALID_HANDLE_VALUE;
 
@@ -66,6 +70,22 @@ UpdateDriverForPlugAndPlayDevicesW(
     {
         TRACE("Unknown flags: 0x%08lx\n", InstallFlags & ~(INSTALLFLAG_FORCE | INSTALLFLAG_READONLY | INSTALLFLAG_NONINTERACTIVE));
         SetLastError(ERROR_INVALID_FLAGS);
+        goto cleanup;
+    }
+
+    if (!HardwareId || !FullInfPath)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        goto cleanup;
+    }
+    /* Driver-list enumeration can succeed with an empty list when the INF is
+     * missing. Report the path error before that obscures it as NO_MORE_ITEMS. */
+    Attributes = GetFileAttributesW(FullInfPath);
+    if (Attributes == INVALID_FILE_ATTRIBUTES)
+        goto cleanup;
+    if (Attributes & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        SetLastError(ERROR_FILE_NOT_FOUND);
         goto cleanup;
     }
 
@@ -93,6 +113,7 @@ UpdateDriverForPlugAndPlayDevicesW(
         while (TRUE)
         {
             /* Get IDs data */
+            HeapFree(GetProcessHeap(), 0, Buffer);
             Buffer = NULL;
             BufferSize = 0;
             while (!SetupDiGetDeviceRegistryPropertyW(DevInstData.hDevInfo,
@@ -143,6 +164,18 @@ UpdateDriverForPlugAndPlayDevicesW(
         if (!FoundHardwareId)
             continue;
 
+        /* DIGCF_PRESENT currently also enumerates registry-only instances.
+         * Do not update an absent device left behind by a PCI layout change. */
+        ConfigRet = CM_Get_DevNode_Status(&DevNodeStatus, &DevNodeProblem,
+                                         DevInstData.devInfoData.DevInst, 0);
+        if (ConfigRet == CR_NO_SUCH_DEVNODE)
+            continue;
+        if (ConfigRet != CR_SUCCESS)
+        {
+            InstallError = ERROR_GEN_FAILURE;
+            continue;
+        }
+
         /* We need to try to update the driver of this device */
 
         /* Get Instance ID */
@@ -175,6 +208,7 @@ UpdateDriverForPlugAndPlayDevicesW(
         /* Search driver in the specified .inf file */
         if (!SearchDriver(&DevInstData, NULL, FullInfPath))
         {
+            InstallError = GetLastError();
             TRACE("SearchDriver() failed with error 0x%x\n", GetLastError());
             continue;
         }
@@ -183,6 +217,7 @@ UpdateDriverForPlugAndPlayDevicesW(
         //if (!InstallCurrentDriver(&DevInstData))
         if (!InstallCurrentDriver(&DevInstData) && GetLastError() != ERROR_PRIVILEGE_NOT_HELD)
         {
+            InstallError = GetLastError();
             TRACE("InstallCurrentDriver() failed with error 0x%x\n", GetLastError());
             continue;
         }
@@ -210,14 +245,17 @@ UpdateDriverForPlugAndPlayDevicesW(
     }
     else
     {
-        TRACE("No device found with HardwareID %s\n", debugstr_w(HardwareId));
-        SetLastError(ERROR_NO_SUCH_DEVINST);
+        TRACE("No device updated for HardwareID %s, error 0x%lx\n",
+              debugstr_w(HardwareId), InstallError);
+        SetLastError(InstallError);
     }
 
 cleanup:
+    LastError = GetLastError();
     if (DevInstData.hDevInfo != INVALID_HANDLE_VALUE)
         SetupDiDestroyDeviceInfoList(DevInstData.hDevInfo);
     HeapFree(GetProcessHeap(), 0, Buffer);
+    SetLastError(LastError);
     return ret;
 }
 

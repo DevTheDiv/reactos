@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <newdev.h>
+#include <setupapi.h>
 #include <drivers/vgpu_diag.h>
 
 static HANDLE OpenProbe(void)
@@ -11,26 +13,64 @@ static HANDLE OpenProbe(void)
                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 }
 
-static int Install(const char *Path)
+static int Install(const char *Path, DWORD Cycles, BOOL Regression)
 {
     typedef BOOL (WINAPI *UPDATE)(HWND, LPCWSTR, LPCWSTR, DWORD, PBOOL);
-    WCHAR Input[MAX_PATH], Full[MAX_PATH];
+    WCHAR Input[MAX_PATH], Full[MAX_PATH], Missing[MAX_PATH], LibraryPath[MAX_PATH];
     HMODULE Library;
     UPDATE Update;
     BOOL Reboot = FALSE, Success;
-    DWORD Length;
+    DWORD Length, i, Error;
+    HANDLE Probe;
+    BOOL Failed = FALSE;
     if (!MultiByteToWideChar(CP_ACP, 0, Path, -1, Input, MAX_PATH)) return 1;
     Length = GetFullPathNameW(Input, MAX_PATH, Full, NULL);
     if (!Length || Length >= MAX_PATH) return 1;
-    Library = LoadLibraryW(L"newdev.dll");
+    /* Exercise the installed system DLL, even if test media has a local copy. */
+    Length = GetSystemDirectoryW(LibraryPath, MAX_PATH);
+    if (!Length || Length + 12 >= MAX_PATH) return 1;
+    wcscat(LibraryPath, L"\\newdev.dll");
+    Library = LoadLibraryW(LibraryPath);
     if (!Library) return 1;
     Update = (UPDATE)GetProcAddress(Library, "UpdateDriverForPlugAndPlayDevicesW");
     if (!Update) { FreeLibrary(Library); return 1; }
-    Success = Update(NULL, L"PCI\\VEN_1AF4&DEV_1050", Full, 1 | 4, &Reboot);
-    printf("install success=%d error=%lu reboot=%d\n", Success,
-           Success ? 0 : GetLastError(), Reboot);
+    if (Regression)
+    {
+        /* This regression specifically exercises updating a running device. */
+        Probe = OpenProbe();
+        if (Probe == INVALID_HANDLE_VALUE) { FreeLibrary(Library); return 1; }
+        CloseHandle(Probe);
+        Success = Update(NULL, L"VGPUTEST\\ABSENT_DEVICE", Full,
+                         INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE, &Reboot);
+        Error = GetLastError();
+        if (Success || Error != ERROR_NO_SUCH_DEVINST)
+        { printf("FAIL: absent hardware result=%d error=%08lx\n", Success, Error); Failed = TRUE; }
+        if (wcslen(Full) + 8 >= MAX_PATH) { FreeLibrary(Library); return 1; }
+        wcscpy(Missing, Full);
+        wcscat(Missing, L".missing");
+        if (GetFileAttributesW(Missing) != INVALID_FILE_ATTRIBUTES)
+        { FreeLibrary(Library); return 1; }
+        Success = Update(NULL, L"PCI\\VEN_1AF4&DEV_1050", Missing,
+                         INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE, &Reboot);
+        Error = GetLastError();
+        if (Success || Error != ERROR_FILE_NOT_FOUND)
+        { printf("FAIL: missing INF result=%d error=%08lx\n", Success, Error); Failed = TRUE; }
+        if (!Failed) puts("PASS: absent hardware and missing INF have distinct errors");
+    }
+    Success = FALSE;
+    for (i = 0; i < Cycles; ++i)
+    {
+        Reboot = FALSE;
+        Success = Update(NULL, L"PCI\\VEN_1AF4&DEV_1050", Full,
+                         INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE, &Reboot);
+        printf("install cycle=%lu success=%d error=%08lx reboot=%d\n", i + 1,
+               Success, Success ? 0 : GetLastError(), Reboot);
+        if (!Success || (Regression && !Reboot))
+        { FreeLibrary(Library); return 1; }
+    }
+    if (Regression && !Failed) printf("PASS: %lu running-device reinstalls staged; reboot required\n", Cycles);
     FreeLibrary(Library);
-    return Success ? 0 : 1;
+    return Success && !Failed ? 0 : 1;
 }
 
 int main(int argc, char **argv)
@@ -40,7 +80,13 @@ int main(int argc, char **argv)
     DWORD Bytes, Error, i, Count = 1000;
     BOOL Success;
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (argc == 3 && !strcmp(argv[1], "--install")) return Install(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "--install")) return Install(argv[2], 1, FALSE);
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "--install-test"))
+    {
+        Count = argc == 4 ? strtoul(argv[3], NULL, 10) : 5;
+        if (!Count || Count > 1000) return 1;
+        return Install(argv[2], Count, TRUE);
+    }
     if (argc == 2) Count = strtoul(argv[1], NULL, 10);
     if (!Count || Count > 100000) return 1;
     Device = OpenProbe();

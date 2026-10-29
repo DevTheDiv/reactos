@@ -5938,6 +5938,28 @@ SetupDiInstallDevice(
        goto cleanup;
     }
 
+    /* A running stack cannot be started a second time. Until live driver
+     * replacement is supported, finish staging the update and activate it at
+     * reboot. Preserve the restart requirement for the caller of newdev. */
+#ifndef __WINESRC__
+    if (!(InstallParams.Flags & DI_DONOTCALLCONFIGMG))
+    {
+        ULONG DevNodeStatus, DevNodeProblem;
+        if (CM_Get_DevNode_Status_Ex(&DevNodeStatus, &DevNodeProblem,
+                                   deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
+            (DevNodeStatus & DN_STARTED))
+        {
+            RebootRequired = TRUE;
+        }
+    }
+#endif
+    if (RebootRequired)
+    {
+        InstallParams.Flags |= DI_NEEDREBOOT;
+        if (!SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams))
+            goto cleanup;
+    }
+
     /* Start the device */
     if (!RebootRequired && !(InstallParams.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT | DI_DONOTCALLCONFIGMG)))
         ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
