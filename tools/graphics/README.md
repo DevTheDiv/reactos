@@ -51,7 +51,8 @@ The installed upstream Windows package fails active Venus initialization.
 [WINQ-EMU Alpha 10](https://github.com/cmspam/winq-emu/releases/tag/alpha10)
 is a candidate with Windows-specific QEMU/virglrenderer patches. Its release
 notes identify QEMU 11.0.0 and virglrenderer 1.3.0 plus the project's patch
-series. It is not yet validated with this ReactOS guest. A newer upstream
+series. It now passes active ReactOS capset/context-command diagnostics; actual
+Vulkan execution remains unverified. A newer upstream
 QEMU version alone does not supply the required Windows renderer integration.
 
 From `C:\ReactOS` in PowerShell:
@@ -70,8 +71,10 @@ for a nonstandard 7z.exe path, or `-Destination` for a different new directory.
 Existing destinations are rejected rather than overwritten.
 
 The script parsed successfully and rejected an incorrect archive digest during
-local verification. Actual download/extraction could not be completed in the
-restricted execution environment; the GitHub download connection failed.
+local verification. Download was initially blocked in the execution environment;
+the user subsequently ran the script successfully. The extracted executable and
+renderer hashes matched its manifest, and active guest testing passed. Results
+and exact hashes are in [winq-alpha10-baseline.json](winq-alpha10-baseline.json).
 
 After extraction, use the candidate's explicit executable path when running
 `probe_host.py --qemu <path> --output <report>`. Then boot a **new** disposable
@@ -79,8 +82,14 @@ overlay of the graphics test image with that same executable and
 `virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=true`, retaining standard VGA.
 Check the candidate's supported display backends before choosing EGL or SDL
 with GL enabled. Run `vgputest --venus` in the guest and inspect QEMU stderr.
-Do not select it in the normal VM launcher until active tests pass. Paused
-startup and context-command ACKs still do not prove Vulkan execution.
+Keep this package confined to the experimental graphics launcher while resource
+lifetime and actual rendering are developed. Paused startup and context-command
+ACKs still do not prove Vulkan execution. The verified invocation uses
+`-display egl-headless` with standard VGA and the non-VGA virtio GPU above.
+Its local launcher is `C:\ReactOS\vm\graphics-winq-launch.ps1`; results are in
+`graphics-winq-result.log`, `graphics-winq-kernel.log`, and `graphics-winq.err`
+under the same VM directory. A host `Failed to create eventfd` warning remains;
+its impact on subsequent rendering/synchronization has not been established.
 
 ## Targeted guest driver build (Windows/RosBE)
 

@@ -19,7 +19,7 @@
   "host_external_memory_fd_advertised": false,
   "host_external_memory_win32_advertised": true,
   "raw_report": "C:/ReactOS/vm/graphics-host-report.json",
-  "next_gate": "Provide a working Venus renderer host backend, then validate blob-resource lifetimes, context execution and Vulkan image readback.",
+  "next_gate": "Validate per-file resource/blob mapping lifetimes and actual Venus/Vulkan execution/readback using the pinned Windows-specific host.",
   "measurement_scope": "Original paused host startup; active guest follow-up recorded separately below",
   "active_guest_followup": {
     "measured_at_utc": "2026-10-29T02:46:18Z",
@@ -29,5 +29,11 @@
     "guest_venus_context_verified": false,
     "guest_vulkan_validated": false,
     "evidence": "drivers/virtio/vgpudiag/README.md#venus-capability-bring-up"
+  },
+  "windows_specific_followup": {
+    "measurement": "winq-alpha10-baseline.json",
+    "venus_capset_transfer": "passed",
+    "context_command_ack_pairs": 8,
+    "guest_vulkan_validated": false
   }
 }

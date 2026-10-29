@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "measured_at_utc": "2026-10-29T02:59:48Z",
+  "release_tag": "alpha10",
+  "release_url": "https://github.com/cmspam/winq-emu/releases/tag/alpha10",
+  "archive_sha256": "7a50aa4fac7a53ef911de2c9db756fbc0b2685dd5522f2a4591910c520f15fbe",
+  "qemu_version": "11.0.0",
+  "qemu_sha256": "a1509091be11d40f4cf0fb83aa2b6fe64c859e60ab5bf42e94b8cc9483bb7d9b",
+  "renderer_sha256": "e84b6a093badf92c61330e297900b17987349208b93237acfef2d81c366b9729",
+  "driver_source_checkpoint": "926a211e88f",
+  "driver_sha256": "57d9032bc194d3125569e8cd3e01bc500c202b02b61f03788dcdf3fd7fb0e8f7",
+  "full_os_build": false,
+  "guest_arch": "i386",
+  "accelerator": "whpx",
+  "vcpus": 1,
+  "memory_mib": 2048,
+  "primary_display": "std",
+  "display_backend": "egl-headless",
+  "gpu_device": "virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=true",
+  "display_info_passed": true,
+  "capsets": [
+    {
+      "id": 1,
+      "version": 1,
+      "bytes": 308
+    },
+    {
+      "id": 2,
+      "version": 2,
+      "bytes": 1408
+    },
+    {
+      "id": 4,
+      "version": 0,
+      "bytes": 160
+    }
+  ],
+  "capability_context_commands_completed": 22,
+  "context_ack_pairs": 8,
+  "diagnostic_cycles": 1000,
+  "protocol_cases_passed": 17,
+  "ring_completions_passed": 264096,
+  "strict_venus_probe_exit": 0,
+  "reset_status": 0,
+  "dma_quarantined": false,
+  "renderer_runtime_validated": true,
+  "validation_scope": "Active guest display/capability transport and context-command acknowledgements only",
+  "guest_venus_context_verified": false,
+  "guest_vulkan_validated": false,
+  "host_warnings": [
+    "CPUID SVM requested but unsupported",
+    "Ignoring request for interrupt vector 0",
+    "Failed to create eventfd"
+  ],
+  "artifacts_root": "C:/ReactOS/vm",
+  "guest_log": "graphics-winq-result.log",
+  "kernel_log": "graphics-winq-kernel.log",
+  "host_stderr": "graphics-winq.err",
+  "launcher": "graphics-winq-launch.ps1",
+  "overlay": "graphics-winq-test.qcow2"
+}

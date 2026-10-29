@@ -22,17 +22,23 @@ Its initial results are recorded in [host-baseline.json](tools/graphics/host-bas
   exposed PCI `1af4:1050`, answered QMP while paused, and exited cleanly.
 - **No guest Vulkan context was verified, no Vulkan commands were submitted, and no
   accelerated image was rendered.** Device initialization is only the first
-  host gate. Active guest testing now confirms a host blocker: the bundled
+  host gate. Active guest testing found a host blocker in the upstream package: the bundled
   virglrenderer fails lazy Venus initialization because render-server support
   was not built in. Ordinary VirGL capset discovery/payload transfer succeeds.
   See [the guest measurements](drivers/virtio/vgpudiag/README.md#venus-capability-bring-up).
+- The separate WINQ-EMU Alpha 10 package clears that initialization failure.
+  The ReactOS guest fetched capsets 1, 2 and 4 (Venus), completed eight context
+  create/destroy command pairs and passed the strict Venus diagnostic. These
+  acknowledgements do not verify actual Vulkan execution or image readback.
+  The pinned measurement is [winq-alpha10-baseline.json](tools/graphics/winq-alpha10-baseline.json).
 - Host ICDs advertise Win32 external-memory handles, not Linux fd/dma-buf
   extensions. That is normal platform differentiation, not a Windows Vulkan
   failure. Stock Venus documentation specifies Linux/Android interoperability;
   actual support in this Windows host build must be measured rather than assumed.
 
-The checks used fresh, paused, diskless QEMU processes. Existing VM disks,
-launchers, display configuration and driver installations were not changed.
+The initial checks used fresh, paused, diskless QEMU processes. Active follow-up
+used disposable disk overlays and a separate host package. Existing base disks
+and the default VM launcher were not changed.
 
 ## Existing code worth reusing
 
@@ -77,7 +83,7 @@ validate those requirements.
 
 | Step | Deliverable | Required evidence |
 | --- | --- | --- |
-| 0: host baseline | Capability report and a known-working Venus context/render reference | Current startup checks pass; guest context creation and rendering remain unverified. Use a Linux reference guest/host if the Windows backend cannot support that test. |
+| 0: host baseline | Capability report and a known-working Venus context/render reference | Windows-specific host passes startup, capset transfer and context-command ACK checks. Actual Vulkan execution/rendering remains unverified. |
 | 1: guest transport | Experimental render-only PCI driver | Correct device binding, bounded BAR mapping, feature negotiation, control queue and GET_DISPLAY_INFO response. Unsupported devices/features fail cleanly. |
 | 2: resource lifetime | Resource create/attach/transfer/unref and bounded NT device interface | Deterministic 2D resource contents; create/close churn, cancellation, invalid sizes/IDs and device-stop tests without leaks or dangling DMA. |
 | 3: Venus transport | Capset discovery, contexts, blobs, host-visible mapping and fences | Negotiate a Venus context and run a real off-screen Vulkan clear/readback with expected pixels. Prove context support rather than inferring it from the QEMU property. |
@@ -92,11 +98,12 @@ driver for these experiments. Use a new overlay and add a non-VGA virtio-gpu
 device beside the existing VGA display. A device initialized without a guest
 driver does not count as completing step 1.
 
-Capability bring-up now covers bounded capset enumeration and payload transfer
-in a real VirGL guest. Venus itself is blocked at host renderer initialization;
-the context-command path remains unverified and step 3 is not complete.
-Fix the host baseline, then implement/test resource lifetime and blob mapping
-before connecting a user-mode Vulkan driver.
+Capability bring-up now covers bounded capset enumeration/payload transfer and
+Venus context-command acknowledgements in a real ReactOS guest with the
+Windows-specific host. Step 3 is not complete. Implement/test resource lifetime,
+blob mapping and actual context execution before connecting a user-mode Vulkan
+driver. Keep the upstream-host failure separate from the working diagnostic
+configuration; do not infer that any Windows QEMU package supports Venus.
 
 ## Initial driver constraints
 

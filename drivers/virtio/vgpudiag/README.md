@@ -107,7 +107,7 @@ open issue; the emulator-reset pass does not establish that path works.
 describe forced installation, error reporting, and caller responsibility for
 the reboot result.
 
-This establishes basic guest transport. Venus contexts, Vulkan execution,
+This establishes basic guest transport. Vulkan execution, persistent user
 resource lifetime, window presentation, and DXVK rendering remain unimplemented.
 
 ## Venus capability bring-up
@@ -128,7 +128,7 @@ published together under the diagnostic lock.
 
 If capset 4 (Venus), its payload, and all required negotiated features are
 present, the experimental path attempts eight context create/destroy pairs.
-**That path has not yet run successfully on this host.** Even successful
+**That path now passes with the separate WINQ-EMU Alpha 10 host package.** Even successful
 command acknowledgements would not establish a working renderer: QEMU's
 `virgl_cmd_context_create` currently ignores the renderer's return value.
 An actual Venus/Vulkan protocol operation and verified image readback remain
@@ -161,6 +161,9 @@ insufficient on the installed Windows package. A compatible host renderer
 build (including its Windows memory-sharing path), or a Linux reference host,
 is the next gate before claiming guest Venus context support.
 
+The separate Windows-specific package has since cleared this initialization
+failure, as measured below; the upstream package remains unchanged.
+
 Both successful configurations also passed 1,000 diagnostic cycles, all 17
 protocol cases, and 264,096 ring completions. Final SYS SHA-256:
 `57d9032bc194d3125569e8cd3e01bc500c202b02b61f03788dcdf3fd7fb0e8f7`.
@@ -170,6 +173,33 @@ Local evidence is under `C:\ReactOS\vm`: `graphics-venus-control-final-result.lo
 `graphics-venus-control.qcow2`, `graphics-virgl-test.qcow2` overlays. The failed
 Venus run used the preceding probe build; its failure occurs before the final
 payload-query changes are reached. This was not a clean OS build.
+
+### WINQ-EMU Alpha 10 follow-up (2026-10-29 UTC)
+
+The separate package at `C:\ReactOS\tools\graphics-host\winq-alpha10` passed
+the diskless preflight and then an active ReactOS boot in a fresh
+`graphics-winq-test.qcow2` overlay of the diagnostic control image. The device
+was `virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=true`, with EGL headless,
+standard VGA, WHPX, one vCPU and 2048 MiB. The same SYS hash recorded above
+was verified inside the guest.
+
+The guest fetched capsets 1/308 bytes, 2/1408 bytes and **4 (Venus)/160 bytes**.
+It completed 22 fenced capability/context commands, including eight context
+create/destroy acknowledgement pairs, with `gate=5 status=0`. Both ordinary
+and strict diagnostics exited 0; 1,000 diagnostic cycles, 17 protocol cases,
+and 264,096 ring completions passed. Device reset succeeded without DMA
+quarantine. No blob mapping or actual Vulkan command stream was tested.
+
+The host logged `Failed to create eventfd`, plus CPUID/interrupt-vector
+warnings. These did not prevent the measured diagnostic operations; their
+impact on rendering and synchronization remains unverified. Do not treat the
+capset/context-ACK pass as a rendered-image pass.
+
+Pinned package hashes and scoped results are in
+[winq-alpha10-baseline.json](../../../tools/graphics/winq-alpha10-baseline.json).
+Local evidence under `C:\ReactOS\vm` is `graphics-winq-result.log`,
+`graphics-winq-kernel.log`, `graphics-winq.err`, `graphics-winq-launch.ps1`,
+and `graphics-winq-host-report.json`. No default launcher or base disk changed.
 
 References: [Virtio GPU wire definitions](https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_gpu.h),
 [QEMU renderer/context code](https://github.com/qemu/qemu/blob/master/hw/display/virtio-gpu-virgl.c),
