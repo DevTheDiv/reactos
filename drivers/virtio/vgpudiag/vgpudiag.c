@@ -33,6 +33,11 @@ C_ASSERT(sizeof(GPU_BLOB_REQUEST) == 56);
 C_ASSERT(sizeof(GPU_MAP_REQUEST) == 40);
 C_ASSERT(sizeof(GPU_MAP_RESPONSE) == 32);
 C_ASSERT(sizeof(VGPU_BLOB_INFO) == 68);
+C_ASSERT(sizeof(VGPU_RESOURCE_INFO) == 40);
+C_ASSERT(sizeof(VGPU_RESOURCE_WRITE_REQUEST) == 8 + VGPU_RESOURCE_BYTES);
+C_ASSERT(sizeof(VGPU_RESOURCE_READ_REQUEST) == 8);
+C_ASSERT(sizeof(VGPU_RESOURCE_READ_RESPONSE) == 4 + VGPU_RESOURCE_BYTES);
+C_ASSERT(VGPU_RESOURCE_BYTES == PAGE_SIZE);
 
 typedef struct _GPU_BAR
 {
@@ -40,6 +45,12 @@ typedef struct _GPU_BAR
     ULONG Length;
     PUCHAR Virtual;
 } GPU_BAR;
+
+typedef struct _GPU_RESOURCE_SLOT
+{
+    PFILE_OBJECT Owner;
+    BOOLEAN InUse;
+} GPU_RESOURCE_SLOT;
 
 typedef struct _GPU_EXTENSION
 {
@@ -60,6 +71,14 @@ typedef struct _GPU_EXTENSION
     ULONGLONG NextFence;
     ULONGLONG VenusDeadline;
     BOOLEAN TrackingBlob;
+    /* Per-file live resource phase: only ever started once, from the single
+     * boot-time GpuProbe call, after the kernel-owned blob probe above has
+     * already proven CREATE/MAP/UNMAP/UNREF work against this backend. */
+    FAST_MUTEX ResourceLock;
+    BOOLEAN LiveReady;
+    struct virtqueue *LiveQueue;
+    GPU_RESOURCE_SLOT ResourceSlots[VGPU_MAX_RESOURCES];
+    VGPU_RESOURCE_INFO ResourceInfo;
 } GPU_EXTENSION;
 
 static LONG DevicePresent;
@@ -558,6 +577,232 @@ Exit:
     return Status;
 }
 
+/* Must be called with ResourceLock held. Does not itself take the lock so
+ * callers can validate ownership and then act (write/unref) atomically. */
+static NTSTATUS GpuResourceLookup(GPU_EXTENSION *Ext, PFILE_OBJECT FileObject,
+                                  ULONG ResourceId, PULONG SlotOut)
+{
+    ULONG Slot;
+    if (ResourceId < VGPU_RESOURCE_BASE_ID) return STATUS_INVALID_PARAMETER;
+    Slot = ResourceId - VGPU_RESOURCE_BASE_ID;
+    if (Slot >= VGPU_MAX_RESOURCES || !Ext->ResourceSlots[Slot].InUse)
+        return STATUS_INVALID_PARAMETER;
+    if (Ext->ResourceSlots[Slot].Owner != FileObject)
+    {
+        ++Ext->ResourceInfo.ForeignIdRejections;
+        return STATUS_ACCESS_DENIED;
+    }
+    *SlotOut = Slot;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS GpuResourceCreate(GPU_EXTENSION *Ext, PFILE_OBJECT FileObject, PULONG ResourceIdOut)
+{
+    GPU_BLOB_REQUEST *Create = Ext->Packet;
+    ULONG Slot, FileCount = 0, i;
+    NTSTATUS Status;
+
+    if (!Ext->LiveReady) return STATUS_DEVICE_NOT_READY;
+    ExAcquireFastMutex(&Ext->ResourceLock);
+    if (!Ext->LiveReady) { ExReleaseFastMutex(&Ext->ResourceLock); return STATUS_DEVICE_NOT_READY; }
+
+    for (i = 0; i < VGPU_MAX_RESOURCES; ++i)
+        if (Ext->ResourceSlots[i].InUse && Ext->ResourceSlots[i].Owner == FileObject)
+            ++FileCount;
+    for (Slot = 0; Slot < VGPU_MAX_RESOURCES && Ext->ResourceSlots[Slot].InUse; ++Slot) {}
+    if (FileCount >= VGPU_MAX_RESOURCES_PER_FILE || Slot == VGPU_MAX_RESOURCES)
+    {
+        ++Ext->ResourceInfo.LimitRejections;
+        ExReleaseFastMutex(&Ext->ResourceLock);
+        return STATUS_QUOTA_EXCEEDED;
+    }
+
+    RtlZeroMemory(Create, VGPU_RESPONSE_OFFSET);
+    Create->Header.Type = VGPU_CREATE_BLOB;
+    Create->Header.Context = VGPU_LIVE_CONTEXT;
+    Create->Resource = VGPU_RESOURCE_BASE_ID + Slot;
+    Create->Memory = 2; /* HOST3D */
+    Create->Flags = 1; /* MAPPABLE */
+    Create->Size = VGPU_RESOURCE_BYTES;
+    Status = GpuCommand(Ext, Ext->LiveQueue, sizeof(*Create), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        Ext->ResourceSlots[Slot].InUse = TRUE;
+        Ext->ResourceSlots[Slot].Owner = FileObject;
+        ++Ext->ResourceInfo.TotalCreates;
+        ++Ext->ResourceInfo.ActiveResources;
+        *ResourceIdOut = VGPU_RESOURCE_BASE_ID + Slot;
+    }
+    ExReleaseFastMutex(&Ext->ResourceLock);
+    return Status;
+}
+
+/* Transactional: maps, copies, unmaps every call. No mapping is ever held
+ * across IOCTLs, and no CPU virtual address is ever returned to user mode. */
+static NTSTATUS GpuResourceTransfer(GPU_EXTENSION *Ext, PFILE_OBJECT FileObject,
+                                    ULONG ResourceId, PUCHAR Data, ULONG Length, BOOLEAN Write)
+{
+    GPU_MAP_REQUEST *Map = Ext->Packet;
+    GPU_RESOURCE_REQUEST *Unmap = Ext->Packet;
+    GPU_MAP_RESPONSE *Reply = (GPU_MAP_RESPONSE *)((PUCHAR)Ext->Packet + VGPU_RESPONSE_OFFSET);
+    PHYSICAL_ADDRESS Physical;
+    PUCHAR View = NULL;
+    MEMORY_CACHING_TYPE Cache;
+    ULONG Slot;
+    NTSTATUS Status;
+
+    if (!Ext->LiveReady) return STATUS_DEVICE_NOT_READY;
+    if (Length > VGPU_RESOURCE_BYTES)
+    {
+        ExAcquireFastMutex(&Ext->ResourceLock);
+        ++Ext->ResourceInfo.OverflowRejections;
+        ExReleaseFastMutex(&Ext->ResourceLock);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    ExAcquireFastMutex(&Ext->ResourceLock);
+    if (!Ext->LiveReady) { ExReleaseFastMutex(&Ext->ResourceLock); return STATUS_DEVICE_NOT_READY; }
+    Status = GpuResourceLookup(Ext, FileObject, ResourceId, &Slot);
+    if (!NT_SUCCESS(Status)) goto Unlock;
+
+    Status = GpuBlobWindow(Ext, &Physical);
+    if (!NT_SUCCESS(Status)) goto Unlock;
+
+    RtlZeroMemory(Map, VGPU_RESPONSE_OFFSET);
+    Map->Resource.Header.Type = VGPU_MAP_BLOB;
+    Map->Resource.Resource = ResourceId;
+    Status = GpuCommand(Ext, Ext->LiveQueue, sizeof(*Map), sizeof(*Reply), VGPU_RESP_MAP_INFO, FALSE);
+    if (!NT_SUCCESS(Status)) goto Unlock;
+
+    if (Reply->Cache == 1) Cache = MmCached;
+    else if (Reply->Cache == 2) Cache = MmNonCached;
+    else if (Reply->Cache == 3) Cache = MmWriteCombined;
+    else { Status = STATUS_NOT_SUPPORTED; goto Unlock; }
+
+    View = MmMapIoSpace(Physical, VGPU_RESOURCE_BYTES, Cache);
+    if (!View) { Status = STATUS_INSUFFICIENT_RESOURCES; goto Unlock; }
+
+    if (Write) WRITE_REGISTER_BUFFER_UCHAR(View, Data, Length);
+    KeMemoryBarrier();
+    if (!Write)
+    {
+        ULONG i;
+        for (i = 0; i < Length; ++i) Data[i] = READ_REGISTER_UCHAR(View + i);
+    }
+    MmUnmapIoSpace(View, VGPU_RESOURCE_BYTES);
+    View = NULL;
+
+    RtlZeroMemory(Unmap, VGPU_RESPONSE_OFFSET);
+    Unmap->Header.Type = VGPU_UNMAP_BLOB;
+    Unmap->Resource = ResourceId;
+    Status = GpuCommand(Ext, Ext->LiveQueue, sizeof(*Unmap), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+
+Unlock:
+    if (View) MmUnmapIoSpace(View, VGPU_RESOURCE_BYTES);
+    ExReleaseFastMutex(&Ext->ResourceLock);
+    return Status;
+}
+
+static NTSTATUS GpuResourceUnref(GPU_EXTENSION *Ext, PFILE_OBJECT FileObject, ULONG ResourceId)
+{
+    GPU_RESOURCE_REQUEST *Request = Ext->Packet;
+    ULONG Slot;
+    NTSTATUS Status;
+
+    if (!Ext->LiveReady) return STATUS_DEVICE_NOT_READY;
+    ExAcquireFastMutex(&Ext->ResourceLock);
+    if (!Ext->LiveReady) { ExReleaseFastMutex(&Ext->ResourceLock); return STATUS_DEVICE_NOT_READY; }
+    Status = GpuResourceLookup(Ext, FileObject, ResourceId, &Slot);
+    if (!NT_SUCCESS(Status)) { ExReleaseFastMutex(&Ext->ResourceLock); return Status; }
+
+    RtlZeroMemory(Request, VGPU_RESPONSE_OFFSET);
+    Request->Header.Type = VGPU_RESOURCE_UNREF;
+    Request->Resource = ResourceId;
+    Status = GpuCommand(Ext, Ext->LiveQueue, sizeof(*Request), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        Ext->ResourceSlots[Slot].InUse = FALSE;
+        Ext->ResourceSlots[Slot].Owner = NULL;
+        ++Ext->ResourceInfo.TotalUnrefs;
+        --Ext->ResourceInfo.ActiveResources;
+    }
+    ExReleaseFastMutex(&Ext->ResourceLock);
+    return Status;
+}
+
+/* IRP_MJ_CLEANUP: releases everything this handle still owns, whether from
+ * an explicit CloseHandle or process exit -- NT sends CLEANUP for every open
+ * handle during process rundown either way. Best-effort: a dying device must
+ * never block that rundown, so command failures are logged, not retried. */
+static VOID GpuResourceCleanupFile(GPU_EXTENSION *Ext, PFILE_OBJECT FileObject)
+{
+    GPU_RESOURCE_REQUEST *Request = Ext->Packet;
+    ULONG i;
+    if (!Ext->LiveReady) return;
+    ExAcquireFastMutex(&Ext->ResourceLock);
+    if (!Ext->LiveReady) { ExReleaseFastMutex(&Ext->ResourceLock); return; }
+    for (i = 0; i < VGPU_MAX_RESOURCES; ++i)
+    {
+        if (!Ext->ResourceSlots[i].InUse || Ext->ResourceSlots[i].Owner != FileObject)
+            continue;
+        RtlZeroMemory(Request, VGPU_RESPONSE_OFFSET);
+        Request->Header.Type = VGPU_RESOURCE_UNREF;
+        Request->Resource = VGPU_RESOURCE_BASE_ID + i;
+        if (NT_SUCCESS(GpuCommand(Ext, Ext->LiveQueue, sizeof(*Request), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE)))
+            ++Ext->ResourceInfo.TotalUnrefs;
+        Ext->ResourceSlots[i].InUse = FALSE;
+        Ext->ResourceSlots[i].Owner = NULL;
+        --Ext->ResourceInfo.ActiveResources;
+        ++Ext->ResourceInfo.CleanupUnrefs;
+    }
+    ExReleaseFastMutex(&Ext->ResourceLock);
+}
+
+/* Mirrors GpuProbe's own Done: teardown, callable later for STOP/REMOVE once
+ * the live phase has kept the transport past the original START_DEVICE IRP. */
+static VOID GpuTeardownLive(GPU_EXTENSION *Ext)
+{
+    NTSTATUS ResetStatus;
+    ULONG i;
+    ExAcquireFastMutex(&Ext->ResourceLock);
+    if (!Ext->LiveReady) { ExReleaseFastMutex(&Ext->ResourceLock); return; }
+    Ext->LiveReady = FALSE;
+    Ext->ResourceInfo.LiveReady = 0;
+    RtlZeroMemory(Ext->ResourceSlots, sizeof(Ext->ResourceSlots));
+    Ext->ResourceInfo.ActiveResources = 0;
+
+    ResetStatus = GpuReset(Ext);
+    if (!NT_SUCCESS(ResetStatus))
+    {
+        /* Never recycle memory the device may still DMA into. */
+        Ext->DmaQuarantined = TRUE;
+        ExReleaseFastMutex(&Ext->ResourceLock);
+        return;
+    }
+    if (Ext->LiveQueue) { virtio_delete_queues(&Ext->Virtio); Ext->LiveQueue = NULL; }
+    if (Ext->Packet) { GpuFreePages(Ext, Ext->Packet); Ext->Packet = NULL; }
+    virtio_device_shutdown(&Ext->Virtio);
+    for (i = 0; i < RTL_NUMBER_OF(Ext->Bars); ++i)
+    {
+        if (Ext->Bars[i].Virtual)
+        {
+            MmUnmapIoSpace(Ext->Bars[i].Virtual, Ext->Bars[i].Length);
+            Ext->Bars[i].Virtual = NULL;
+        }
+    }
+    if (Ext->CommandChanged && Ext->Bus.SetBusData)
+    {
+        Ext->Bus.SetBusData(Ext->Bus.Context, PCI_WHICHSPACE_CONFIG, &Ext->OriginalCommand,
+                            FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Ext->OriginalCommand));
+    }
+    Ext->CommandChanged = FALSE;
+    if (Ext->Bus.InterfaceDereference) Ext->Bus.InterfaceDereference(Ext->Bus.Context);
+    RtlZeroMemory(&Ext->Bus, sizeof(Ext->Bus));
+    RtlZeroMemory(Ext->Bars, sizeof(Ext->Bars));
+    RtlZeroMemory(&Ext->Virtio, sizeof(Ext->Virtio));
+    ExReleaseFastMutex(&Ext->ResourceLock);
+}
+
 static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
 {
     NTSTATUS Status, ResetStatus = STATUS_SUCCESS;
@@ -674,8 +919,36 @@ static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
              Ext->ProbeVenus.CompletedRequests, Ext->ProbeVenus.ContextAckPairs, Ext->ProbeVenus.LastCommand, Ext->ProbeVenus.LastResponse);
     Status = STATUS_SUCCESS;
 
+    /* The blob probe already proved CREATE/MAP/UNMAP/UNREF against this exact
+     * backend. Keep the transport alive for per-file resource IOCTLs instead
+     * of resetting -- GpuTeardownLive (STOP/REMOVE_DEVICE) tears it down
+     * later. One more context, reusing the same proven Queue/Packet. */
+    if (Status == STATUS_SUCCESS && Device->common &&
+        Ext->ProbeBlob.Status == STATUS_SUCCESS && Ext->ProbeBlob.Stage == VGPU_BLOB_COMPLETE)
+    {
+        GPU_CONTEXT_REQUEST *LiveContext = Ext->Packet;
+        RtlZeroMemory(LiveContext, VGPU_RESPONSE_OFFSET);
+        LiveContext->Header.Type = VGPU_CTX_CREATE;
+        LiveContext->Header.Context = VGPU_LIVE_CONTEXT;
+        LiveContext->Init = VGPU_CAPSET_VENUS;
+        LiveContext->NameLength = 9;
+        RtlCopyMemory(LiveContext->Name, "vgpu-live", 9);
+        if (NT_SUCCESS(GpuCommand(Ext, Queue, sizeof(*LiveContext), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE)))
+        {
+            Ext->LiveQueue = Queue;
+            RtlZeroMemory(Ext->ResourceSlots, sizeof(Ext->ResourceSlots));
+            RtlZeroMemory(&Ext->ResourceInfo, sizeof(Ext->ResourceInfo));
+            Ext->ResourceInfo.Size = sizeof(Ext->ResourceInfo);
+            Ext->ResourceInfo.Version = VGPU_RESOURCE_VERSION;
+            Ext->ResourceInfo.LiveReady = 1;
+            Ext->LiveReady = TRUE;
+            Queue = NULL; /* ownership transferred to Ext->LiveQueue */
+            DbgPrint("vgpudiag: live resource phase ready, context=%lu\n", VGPU_LIVE_CONTEXT);
+        }
+    }
+
 Done:
-    if (Device->common)
+    if (!Ext->LiveReady && Device->common)
     {
         ResetStatus = GpuReset(Ext);
         if (!NT_SUCCESS(ResetStatus))
@@ -693,23 +966,26 @@ Done:
             virtio_device_shutdown(Device);
         }
     }
-    for (i = 0; i < RTL_NUMBER_OF(Ext->Bars); ++i)
+    if (!Ext->LiveReady)
     {
-        if (Ext->Bars[i].Virtual)
-            MmUnmapIoSpace(Ext->Bars[i].Virtual, Ext->Bars[i].Length);
+        for (i = 0; i < RTL_NUMBER_OF(Ext->Bars); ++i)
+        {
+            if (Ext->Bars[i].Virtual)
+                MmUnmapIoSpace(Ext->Bars[i].Virtual, Ext->Bars[i].Length);
+        }
+        Command = Ext->OriginalCommand;
+        if (Ext->DmaQuarantined)
+            Command = (Command & ~PCI_ENABLE_BUS_MASTER) | VGPU_INTX_DISABLE;
+        if (Ext->CommandChanged && Ext->Bus.SetBusData)
+            Ext->Bus.SetBusData(Ext->Bus.Context, PCI_WHICHSPACE_CONFIG,
+                                &Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Command));
+        if (Ext->Bus.InterfaceDereference) Ext->Bus.InterfaceDereference(Ext->Bus.Context);
+        RtlZeroMemory(&Ext->Bus, sizeof(Ext->Bus));
+        RtlZeroMemory(Ext->Bars, sizeof(Ext->Bars));
+        RtlZeroMemory(Device, sizeof(*Device));
+        Ext->Packet = NULL;
+        Ext->CommandChanged = FALSE;
     }
-    Command = Ext->OriginalCommand;
-    if (Ext->DmaQuarantined)
-        Command = (Command & ~PCI_ENABLE_BUS_MASTER) | VGPU_INTX_DISABLE;
-    if (Ext->CommandChanged && Ext->Bus.SetBusData)
-        Ext->Bus.SetBusData(Ext->Bus.Context, PCI_WHICHSPACE_CONFIG,
-                            &Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command), sizeof(Command));
-    if (Ext->Bus.InterfaceDereference) Ext->Bus.InterfaceDereference(Ext->Bus.Context);
-    RtlZeroMemory(&Ext->Bus, sizeof(Ext->Bus));
-    RtlZeroMemory(Ext->Bars, sizeof(Ext->Bars));
-    RtlZeroMemory(Device, sizeof(*Device));
-    Ext->Packet = NULL;
-    Ext->CommandChanged = FALSE;
     Info.Status = Status;
     Info.ResetStatus = ResetStatus;
     KeAcquireSpinLock(&Ext->InfoLock, &Irql);
@@ -756,6 +1032,7 @@ static NTSTATUS NTAPI GpuDispatch(PDEVICE_OBJECT Device, PIRP Irp)
                 IoReleaseRemoveLock(&Ext->RemoveLock, Irp);
                 return GpuComplete(Irp, Status);
             case IRP_MN_REMOVE_DEVICE:
+                GpuTeardownLive(Ext);
                 IoReleaseRemoveLockAndWait(&Ext->RemoveLock, Irp);
                 Status = GpuForwardWait(Ext, Irp);
                 IoDeleteSymbolicLink(&Link);
@@ -764,50 +1041,117 @@ static NTSTATUS NTAPI GpuDispatch(PDEVICE_OBJECT Device, PIRP Irp)
                 IoDeleteDevice(Device);
                 InterlockedExchange(&DevicePresent, 0);
                 return Status;
+            case IRP_MN_STOP_DEVICE:
+                GpuTeardownLive(Ext);
+                break;
             case IRP_MN_QUERY_STOP_DEVICE:
             case IRP_MN_QUERY_REMOVE_DEVICE:
                 Irp->IoStatus.Status = STATUS_SUCCESS;
                 break;
         }
     }
-    else if (Stack->MajorFunction == IRP_MJ_CREATE ||
-             Stack->MajorFunction == IRP_MJ_CLEANUP || Stack->MajorFunction == IRP_MJ_CLOSE)
+    else if (Stack->MajorFunction == IRP_MJ_CREATE || Stack->MajorFunction == IRP_MJ_CLOSE)
     {
+        IoReleaseRemoveLock(&Ext->RemoveLock, Irp);
+        return GpuComplete(Irp, STATUS_SUCCESS);
+    }
+    else if (Stack->MajorFunction == IRP_MJ_CLEANUP)
+    {
+        GpuResourceCleanupFile(Ext, Stack->FileObject);
         IoReleaseRemoveLock(&Ext->RemoveLock, Irp);
         return GpuComplete(Irp, STATUS_SUCCESS);
     }
     else if (Stack->MajorFunction == IRP_MJ_DEVICE_CONTROL)
     {
+        ULONG Code = Stack->Parameters.DeviceIoControl.IoControlCode;
+        ULONG InLen = Stack->Parameters.DeviceIoControl.InputBufferLength;
+        ULONG OutLen = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+        PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
         ULONG Size;
         PVOID Snapshot;
         Status = STATUS_INVALID_DEVICE_REQUEST;
-        if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_DIAGNOSTICS ||
-            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS ||
-            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_BLOB)
+        if (Code == IOCTL_VGPU_QUERY_DIAGNOSTICS || Code == IOCTL_VGPU_QUERY_VENUS ||
+            Code == IOCTL_VGPU_QUERY_BLOB)
         {
-            if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_BLOB)
-            {
-                Snapshot = &Ext->Blob;
-                Size = sizeof(Ext->Blob);
-            }
-            else if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS)
-            {
-                Snapshot = &Ext->Venus;
-                Size = sizeof(Ext->Venus);
-            }
-            else
-            {
-                Snapshot = &Ext->Info;
-                Size = sizeof(Ext->Info);
-            }
+            if (Code == IOCTL_VGPU_QUERY_BLOB) { Snapshot = &Ext->Blob; Size = sizeof(Ext->Blob); }
+            else if (Code == IOCTL_VGPU_QUERY_VENUS) { Snapshot = &Ext->Venus; Size = sizeof(Ext->Venus); }
+            else { Snapshot = &Ext->Info; Size = sizeof(Ext->Info); }
             Status = STATUS_BUFFER_TOO_SMALL;
-            if (Stack->Parameters.DeviceIoControl.OutputBufferLength >= Size)
+            if (OutLen >= Size)
             {
                 KeAcquireSpinLock(&Ext->InfoLock, &Irql);
-                RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, Snapshot, Size);
+                RtlCopyMemory(Buffer, Snapshot, Size);
                 KeReleaseSpinLock(&Ext->InfoLock, Irql);
                 Irp->IoStatus.Information = Size;
                 Status = STATUS_SUCCESS;
+            }
+        }
+        else if (Code == IOCTL_VGPU_QUERY_RESOURCES)
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+            if (OutLen >= sizeof(Ext->ResourceInfo))
+            {
+                ExAcquireFastMutex(&Ext->ResourceLock);
+                RtlCopyMemory(Buffer, &Ext->ResourceInfo, sizeof(Ext->ResourceInfo));
+                ExReleaseFastMutex(&Ext->ResourceLock);
+                Irp->IoStatus.Information = sizeof(Ext->ResourceInfo);
+                Status = STATUS_SUCCESS;
+            }
+        }
+        else if (Code == IOCTL_VGPU_RESOURCE_CREATE)
+        {
+            ULONG ResourceId;
+            Status = STATUS_BUFFER_TOO_SMALL;
+            if (OutLen >= sizeof(ResourceId))
+            {
+                Status = GpuResourceCreate(Ext, Stack->FileObject, &ResourceId);
+                if (NT_SUCCESS(Status))
+                {
+                    RtlCopyMemory(Buffer, &ResourceId, sizeof(ResourceId));
+                    Irp->IoStatus.Information = sizeof(ResourceId);
+                }
+            }
+        }
+        else if (Code == IOCTL_VGPU_RESOURCE_WRITE)
+        {
+            PVGPU_RESOURCE_WRITE_REQUEST Req = Buffer;
+            Status = STATUS_INVALID_PARAMETER;
+            if (InLen >= FIELD_OFFSET(VGPU_RESOURCE_WRITE_REQUEST, Data) &&
+                Req->Length <= InLen - FIELD_OFFSET(VGPU_RESOURCE_WRITE_REQUEST, Data) &&
+                Req->Length <= sizeof(Req->Data))
+            {
+                Status = GpuResourceTransfer(Ext, Stack->FileObject, Req->ResourceId,
+                                             Req->Data, Req->Length, TRUE);
+            }
+        }
+        else if (Code == IOCTL_VGPU_RESOURCE_READ)
+        {
+            PVGPU_RESOURCE_READ_REQUEST Req = Buffer;
+            PVGPU_RESOURCE_READ_RESPONSE Resp = Buffer;
+            ULONG ResourceId, ReqLen;
+            Status = STATUS_BUFFER_TOO_SMALL;
+            if (InLen >= sizeof(*Req) && OutLen >= FIELD_OFFSET(VGPU_RESOURCE_READ_RESPONSE, Data))
+            {
+                /* Capture the aliased input fields before Resp (same buffer) is written. */
+                ResourceId = Req->ResourceId;
+                ReqLen = min(Req->Length, OutLen - FIELD_OFFSET(VGPU_RESOURCE_READ_RESPONSE, Data));
+                ReqLen = min(ReqLen, sizeof(Resp->Data));
+                Status = GpuResourceTransfer(Ext, Stack->FileObject, ResourceId, Resp->Data, ReqLen, FALSE);
+                if (NT_SUCCESS(Status))
+                {
+                    Resp->Length = ReqLen;
+                    Irp->IoStatus.Information = FIELD_OFFSET(VGPU_RESOURCE_READ_RESPONSE, Data) + ReqLen;
+                }
+            }
+        }
+        else if (Code == IOCTL_VGPU_RESOURCE_UNREF)
+        {
+            ULONG ResourceId;
+            Status = STATUS_BUFFER_TOO_SMALL;
+            if (InLen >= sizeof(ResourceId))
+            {
+                RtlCopyMemory(&ResourceId, Buffer, sizeof(ResourceId));
+                Status = GpuResourceUnref(Ext, Stack->FileObject, ResourceId);
             }
         }
         IoReleaseRemoveLock(&Ext->RemoveLock, Irp);
@@ -844,6 +1188,7 @@ static NTSTATUS NTAPI GpuAddDevice(PDRIVER_OBJECT Driver, PDEVICE_OBJECT Pdo)
     Ext->Self = Device;
     IoInitializeRemoveLock(&Ext->RemoveLock, VGPU_TAG, 0, 0);
     KeInitializeSpinLock(&Ext->InfoLock);
+    ExInitializeFastMutex(&Ext->ResourceLock);
     Ext->Info.Size = sizeof(Ext->Info);
     Ext->Info.Version = VGPU_DIAG_VERSION;
     Ext->Info.Status = STATUS_DEVICE_NOT_READY;

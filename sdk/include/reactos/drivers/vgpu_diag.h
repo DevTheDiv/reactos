@@ -81,3 +81,54 @@ typedef struct _VGPU_BLOB_INFO
     ULONG ResourceCreates, ResourceUnrefs, LastCommand, LastResponse, CachePolicy;
     ULONG StaleIdRejections;
 } VGPU_BLOB_INFO;
+
+/*
+ * Per-file live resource ownership. Only reachable once the boot-time blob
+ * probe above has already proven the backend out; every op here is still a
+ * bounded, kernel-mediated map/copy/unmap -- no raw VA is ever handed to
+ * user mode, only bytes. Each open handle may own up to
+ * VGPU_MAX_RESOURCES_PER_FILE resources; IRP_MJ_CLEANUP (handle close or
+ * process exit) releases anything that handle still owns.
+ */
+#define IOCTL_VGPU_QUERY_RESOURCES \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x904, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define IOCTL_VGPU_RESOURCE_CREATE \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x905, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_VGPU_RESOURCE_WRITE \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x906, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#define IOCTL_VGPU_RESOURCE_READ \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x907, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define IOCTL_VGPU_RESOURCE_UNREF \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x908, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define VGPU_RESOURCE_VERSION 1
+#define VGPU_MAX_RESOURCES 32
+#define VGPU_MAX_RESOURCES_PER_FILE 8
+#define VGPU_RESOURCE_BASE_ID 1000
+#define VGPU_RESOURCE_BYTES 4096
+
+typedef struct _VGPU_RESOURCE_INFO
+{
+    ULONG Size, Version, LiveReady;
+    ULONG TotalCreates, TotalUnrefs, ActiveResources;
+    ULONG LimitRejections, ForeignIdRejections, OverflowRejections, CleanupUnrefs;
+} VGPU_RESOURCE_INFO;
+
+typedef struct _VGPU_RESOURCE_WRITE_REQUEST
+{
+    ULONG ResourceId, Length;
+    UCHAR Data[VGPU_RESOURCE_BYTES];
+} VGPU_RESOURCE_WRITE_REQUEST, *PVGPU_RESOURCE_WRITE_REQUEST;
+
+typedef struct _VGPU_RESOURCE_READ_REQUEST
+{
+    ULONG ResourceId, Length;
+} VGPU_RESOURCE_READ_REQUEST, *PVGPU_RESOURCE_READ_REQUEST;
+
+/* Aliases the same METHOD_BUFFERED buffer as VGPU_RESOURCE_READ_REQUEST above;
+ * handlers must capture ResourceId/Length to locals before writing this. */
+typedef struct _VGPU_RESOURCE_READ_RESPONSE
+{
+    ULONG Length;
+    UCHAR Data[VGPU_RESOURCE_BYTES];
+} VGPU_RESOURCE_READ_RESPONSE, *PVGPU_RESOURCE_READ_RESPONSE;

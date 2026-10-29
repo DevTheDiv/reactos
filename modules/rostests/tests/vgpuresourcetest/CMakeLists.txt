@@ -1,0 +1,4 @@
+add_executable(vgpuresourcetest vgpuresourcetest.c)
+set_module_type(vgpuresourcetest win32cui)
+add_importlibs(vgpuresourcetest msvcrt kernel32)
+add_rostests_file(TARGET vgpuresourcetest)

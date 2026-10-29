@@ -26,6 +26,10 @@
 #define VGPU_RESPONSE_OFFSET 128
 #define VGPU_MAX_VENUS_DATA 2048
 #define VGPU_CONTEXT_CYCLES 8
+/* Reserved GPU context id for the persistent per-file resource phase; the
+ * boot-time probes above always create and destroy their own contexts
+ * (1..VGPU_CONTEXT_CYCLES and 32) before this one is ever created. */
+#define VGPU_LIVE_CONTEXT 64
 
 typedef struct _GPU_HEADER
 {
