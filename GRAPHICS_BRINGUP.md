@@ -82,8 +82,10 @@ validate those requirements.
 | 4: presentation | Native window presentation | Resize, minimize/restore and window/process close survive sustained rendering. Start with bounded readback to the existing GDI display path if necessary; measure that copy cost separately. |
 | 5: DXVK sample | Pinned DXVK/Vulkan driver versions and one small D3D program | Actual rendering, pixel checks, repeated launch/exit and stable sustained execution. Check the selected DXVK release's requirements explicitly. |
 
-The next implementation should be step 1, alongside the missing host context
-proof. Do not modify the default VM launcher or replace the primary display
+Step 1 now has an experimental implementation in `drivers/virtio/vgpudiag`.
+It has completed a fenced GET_DISPLAY_INFO request in an i386 ReactOS guest;
+see [the transport notes](drivers/virtio/vgpudiag/README.md) for evidence and
+limits. The missing host context proof remains open. Do not modify the default VM launcher or replace the primary display
 driver for these experiments. Use a new overlay and add a non-VGA virtio-gpu
 device beside the existing VGA display. A device initialized without a guest
 driver does not count as completing step 1.

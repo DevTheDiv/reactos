@@ -40,3 +40,25 @@ rendering, guest Vulkan support, or DXVK support.** The report deliberately keep
 [GRAPHICS_BRINGUP.md](../../GRAPHICS_BRINGUP.md).
 
 The initial host measurement is summarized in [host-baseline.json](host-baseline.json).
+
+## Targeted guest driver build (Windows/RosBE)
+
+From `C:\ReactOS`, with an existing i386 MinGW Makefiles build containing
+generated headers, import libraries, and SAC driver linker inputs:
+
+```powershell
+python source/tools/graphics/build_driver.py --build-dir C:/ReactOS/integration-build-make --output C:/ReactOS/vm/graphics-m3
+```
+
+The helper builds `vgpudiag.sys`, its INF, `vgputest.exe`, and
+`virtioringtest.exe`. It compiles all virtio C sources into a private archive
+from the checkout containing the script, even when the supplied build directory
+was configured against another worktree. It does not overwrite that worktree's
+virtio library. `build.log` records commands; `build-manifest.json` records
+source hashes, checkout HEAD, generated-build provenance, and driver SHA-256.
+This is a targeted build using existing generated inputs, not a clean OS build.
+Use `--rosbe` to override the default sibling `tools/RosBE` directory.
+
+See [vgpudiag](../../drivers/virtio/vgpudiag/README.md) for the isolated VM
+procedure, queue regression, and limitations. Do not install this probe as the
+primary display driver or infer Vulkan support from its diagnostic result.

@@ -1,0 +1,42 @@
+[Version]
+Signature="$Windows NT$"
+Class=System
+ClassGUID={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%Provider%
+DriverVer=10/28/2026,0.0.1.0
+
+[Manufacturer]
+%Provider%=Models
+
+[Models]
+%Device%=Vgpu,PCI\VEN_1AF4&DEV_1050
+
+[Vgpu]
+CopyFiles=DriverCopy
+
+[DriverCopy]
+vgpudiag.sys
+
+[DestinationDirs]
+DriverCopy=12
+
+[Vgpu.Services]
+AddService=vgpudiag,2,Service
+
+[Service]
+DisplayName=%Device%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\vgpudiag.sys
+
+[SourceDisksNames]
+1=%Disk%,,,
+
+[SourceDisksFiles]
+vgpudiag.sys=1
+
+[Strings]
+Provider="ReactOS Project"
+Device="Experimental Virtio GPU diagnostics (no display acceleration)"
+Disk="Virtio GPU diagnostics"

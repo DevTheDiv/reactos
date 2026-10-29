@@ -1,0 +1,8 @@
+add_executable(virtioringtest virtioringtest.c)
+target_include_directories(virtioringtest PRIVATE ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/virtio)
+if(NOT MSVC)
+    target_compile_options(virtioringtest PRIVATE -Wno-unused-function -Wno-attributes)
+endif()
+set_module_type(virtioringtest win32cui)
+add_importlibs(virtioringtest msvcrt kernel32 ntdll)
+add_rostests_file(TARGET virtioringtest)

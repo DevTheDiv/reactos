@@ -502,6 +502,11 @@ struct virtqueue *vring_new_virtqueue_split(
 
     RtlZeroMemory(vq, sizeof(*vq) + num * sizeof(void *));
 
+    /* Fresh DMA allocations need not contain zeroes. Initialize both shared
+     * indices before publishing the queue; a stale used index otherwise looks
+     * like a completion for a descriptor whose opaque token was never set. */
+    RtlZeroMemory(pages, vring_size_split(num, vring_align));
+
     vring_init(&vq->vring, num, pages, vring_align);
     vq->vq.vdev = vdev;
     vq->vq.notification_cb = notify;
