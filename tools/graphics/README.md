@@ -45,6 +45,43 @@ rendering, guest Vulkan support, or DXVK support.** The report deliberately keep
 
 The initial host measurement is summarized in [host-baseline.json](host-baseline.json).
 
+## Separate Windows Venus host candidate
+
+The installed upstream Windows package fails active Venus initialization.
+[WINQ-EMU Alpha 10](https://github.com/cmspam/winq-emu/releases/tag/alpha10)
+is a candidate with Windows-specific QEMU/virglrenderer patches. Its release
+notes identify QEMU 11.0.0 and virglrenderer 1.3.0 plus the project's patch
+series. It is not yet validated with this ReactOS guest. A newer upstream
+QEMU version alone does not supply the required Windows renderer integration.
+
+From `C:\ReactOS` in PowerShell:
+
+```powershell
+.\source\tools\graphics\prepare_host.ps1
+```
+
+This downloads the pinned `alpha10` release, verifies its
+[published SHA-256](https://github.com/cmspam/winq-emu/releases/expanded_assets/alpha10),
+and uses 7-Zip to extract it into `C:\ReactOS\tools\graphics-host\winq-alpha10`.
+It does not execute the installer, change PATH, or replace the existing QEMU
+installation. `host-package.json` records the release and extracted binary
+hashes. Use `-ArchivePath <downloaded-exe>` for an offline archive, `-SevenZip`
+for a nonstandard 7z.exe path, or `-Destination` for a different new directory.
+Existing destinations are rejected rather than overwritten.
+
+The script parsed successfully and rejected an incorrect archive digest during
+local verification. Actual download/extraction could not be completed in the
+restricted execution environment; the GitHub download connection failed.
+
+After extraction, use the candidate's explicit executable path when running
+`probe_host.py --qemu <path> --output <report>`. Then boot a **new** disposable
+overlay of the graphics test image with that same executable and
+`virtio-gpu-gl-pci,hostmem=256M,blob=true,venus=true`, retaining standard VGA.
+Check the candidate's supported display backends before choosing EGL or SDL
+with GL enabled. Run `vgputest --venus` in the guest and inspect QEMU stderr.
+Do not select it in the normal VM launcher until active tests pass. Paused
+startup and context-command ACKs still do not prove Vulkan execution.
+
 ## Targeted guest driver build (Windows/RosBE)
 
 From `C:\ReactOS`, with an existing i386 MinGW Makefiles build containing
