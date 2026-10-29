@@ -2,15 +2,17 @@
 
 Recorded 2026-10-28 Pacific / 2026-10-29 UTC. Branch:
 `graphics/virtio-gpu-vulkan`, based on `node-support` at `dba8148521d`.
-Latest verified milestone: `6b48d164725`.
+Latest verified code milestone: `5732c1b18b5`.
 
 ## Resume here
 
 The separate Windows Venus host now passes the ReactOS transport probe.
 **Actual guest Vulkan execution and rendered-image readback remain unverified.**
-The next implementation is bounded blob-resource creation, mapping, unmapping,
-and release, with ownership and cleanup tied to each open file/process. No
-Vulkan ICD, user submission interface, or persistent user resource API exists yet.
+Kernel-owned blob creation/mapping/remapping/release now passes a bounded
+eight-cycle probe with a private polling host adapter. The next implementation
+is ownership and cleanup tied to each open file/process, then bounded user-mode
+mappings. No Vulkan ICD, user submission interface, or persistent user resource
+API exists yet.
 
 ## Completed and verified
 
@@ -23,6 +25,7 @@ Vulkan ICD, user submission interface, or persistent user resource API exists ye
 | Bounded capability/context diagnostics | `926a211e88f`; separate versioned snapshot, capped payloads, unique fences, response validation, timeouts, and context-command acknowledgement tests. |
 | Separate Windows host preparation | `f75b558378b`; pinned release hash, 7-Zip extraction, no installer execution or default QEMU replacement. |
 | Active Windows Venus transport pass | `6b48d164725`; WINQ-EMU Alpha 10 clears the upstream package's lazy renderer initialization failure. |
+| Kernel-owned blob lifetime probe | `5732c1b18b5`; eight creates/unrefs, 16 maps/unmaps, 65,536 verified bytes, eight stale-ID rejections, 31 protocol checks. Requires the private polling host adapter described below. |
 
 The latest guest run fetched capsets 1 (308 bytes), 2 (1408 bytes), and
 4/Venus (160 bytes). It completed 22 fenced capability/context commands,
@@ -60,13 +63,22 @@ experiments. Existing base disks and the default VM launcher were not changed.
 
 ## Remaining limitations
 
-- `Failed to create eventfd`, unsupported SVM CPUID, and interrupt-vector
-  warnings appear on the candidate host. They did not block the measured
-  operations; rendering/synchronization consequences remain unverified.
+- The original Alpha 10 EGL eventfd warning is now confirmed to prevent real
+  proxy context creation. A private adapter clears threaded/async-fence flags
+  and logs actual renderer return codes; the blob probe passes with it. The
+  original package is not sufficient for this resource test. See
+  [the blob notes](drivers/virtio/vgpudiag/README.md#kernel-owned-blob-lifecycle-probe)
+  and [blob-baseline.json](tools/graphics/blob-baseline.json).
+- Unsupported SVM CPUID and interrupt-vector warnings did not block the
+  measured operations. The eventfd failure did block real contexts on the
+  original EGL configuration; the private polling adapter avoids that path.
+  Its behavior for actual Vulkan submissions remains unverified.
 - The driver is a polling diagnostic: it resets the device after probing.
   Cached snapshot reads are not repeated GPU submissions or performance tests.
-- No validated blob mapping, process-owned GPU resources, Vulkan instance/device
-  client, Vulkan ICD, native presentation, or DXVK rendering exists yet.
+- Blob mappings are validated only inside the kernel-owned probe. No process-owned
+  GPU resources, user mapping interface, Vulkan instance/device client, Vulkan
+  ICD, native presentation, or DXVK rendering exists yet. Fenced unmap stalls
+  in the pinned host; this CPU-only probe uses ordinary unmap completion ACKs.
 - No physical GPU driver or hardware acceleration on bare-metal ReactOS has
   been established by these VM tests.
 - These were targeted builds using existing generated headers/import libraries,
@@ -80,10 +92,10 @@ experiments. Existing base disks and the default VM launcher were not changed.
 
 1. Define versioned, bounded resource operations and per-file ownership:
    opaque resource IDs, allocation limits, references, and cleanup rules.
-2. Implement RESOURCE_CREATE_BLOB, MAP_BLOB, UNMAP_BLOB, and RESOURCE_UNREF.
-   Discover and validate the host-visible window; bound every size and offset,
-   including what the i386 guest can map. Establish cleanup/reset behavior
-   before exposing mappings to user mode.
+2. Extend the verified kernel-owned CREATE_BLOB/MAP_BLOB/UNMAP_BLOB/UNREF path
+   into those per-file operations. Keep the validated host-window bounds and
+   i386 mapping limits; establish cancellation and stop/reset behavior before
+   exposing mappings to user mode.
 3. Test known-byte mappings, allocation/free churn, invalid and foreign IDs,
    overflow, process exit, failed commands, and reset/stop cleanup. A local
    mapping check alone does not establish GPU visibility or execution.

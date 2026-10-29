@@ -57,5 +57,12 @@
   "kernel_log": "graphics-winq-kernel.log",
   "host_stderr": "graphics-winq.err",
   "launcher": "graphics-winq-launch.ps1",
-  "overlay": "graphics-winq-test.qcow2"
+  "overlay": "graphics-winq-test.qcow2",
+  "blob_followup": {
+    "measurement": "blob-baseline.json",
+    "original_egl_context_result": "failed eventfd fencing despite context ACKs",
+    "private_poll_adapter_blob_lifecycle": "passed",
+    "per_file_api_implemented": false,
+    "guest_vulkan_validated": false
+  }
 }

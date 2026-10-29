@@ -204,3 +204,84 @@ and `graphics-winq-host-report.json`. No default launcher or base disk changed.
 References: [Virtio GPU wire definitions](https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_gpu.h),
 [QEMU renderer/context code](https://github.com/qemu/qemu/blob/master/hw/display/virtio-gpu-virgl.c),
 and [Mesa Venus requirements](https://docs.mesa3d.org/drivers/venus.html).
+
+## Kernel-owned blob lifecycle probe
+
+`5732c1b18b5` adds a boot-time probe and a separate version 1/68-byte
+`IOCTL_VGPU_QUERY_BLOB` snapshot. `vgputest --blob` requires this probe to pass.
+The original display and Venus snapshot layouts are unchanged. There are still
+no process-owned resource handles, user mappings, or arbitrary submissions.
+
+The probe validates the modern PCI shared-memory capability (type 8, ID 1),
+including its full 64-bit offset/length, the assigned BAR span, page alignment,
+overflow and the initial i386 mapping limit below 4 GiB. It maps only a single
+4-KiB resource at a time, not the full 256-MiB host window. Cache policy comes
+from the validated MAP_BLOB response. CPU mappings are released before host
+unmap, and no CPU mapping survives the probe.
+
+Eight iterations reuse resource ID 256 after CREATE_BLOB, MAP_BLOB,
+UNMAP_BLOB, remap and RESOURCE_UNREF. Each iteration writes a distinct byte
+pattern, checks it, then checks persistence after remapping. A MAP_BLOB request
+after each unref must return INVALID_RESOURCE_ID. This tests actual absence
+before reusing the ID, rather than trusting an unref ACK alone.
+
+All operations except unmap use unique fenced responses. Unmap uses an ordinary
+command-completion ACK with zero fence/flags: this transport-memory probe has
+no GPU submissions in flight. Fenced unmap stalled in the pinned host's deferred
+path. This exception must not be used to unmap memory still referenced by GPU
+work; a future submission API must drain the relevant GPU fences first.
+Response validation rejects mismatched fenced/unfenced replies. Any failed
+command ends submission and falls back to device reset. The existing bounded
+reset/quarantine policy applies. The phase has a 30-second overall deadline.
+
+### Windows host adapter required for this probe
+
+More detailed renderer logging established that the original Alpha 10 EGL
+`eventfd` warning is consequential: proxy context creation fails fencing, even
+though QEMU returns context-command ACKs. CREATE_BLOB then fails with an invalid
+context. The earlier capset/ACK measurement remains valid only within its
+recorded scope; it did not establish a usable context.
+
+`tools/graphics/virgl_poll.c` is an experimental host adapter around the pinned
+renderer. It removes THREAD_SYNC/ASYNC_FENCE_CB at initialization, leaves QEMU's
+renderer polling active, logs actual renderer context-creation return values,
+and forwards all other exports unchanged. It never fabricates resource or fence
+success. In the successful run, renderer context creation returned 0 and the
+real host subsequently created and mapped the blobs.
+
+Build a separate copy with an x64 MinGW GCC and objdump:
+
+```powershell
+python source/tools/graphics/build_poll_host.py --package C:/ReactOS/tools/graphics-host/winq-alpha10 --output C:/ReactOS/tools/graphics-host/winq-alpha10-poll
+```
+
+The output must be a new directory. The original renderer hash is enforced,
+binary/source hashes are recorded, and original named/ordinal exports are
+forwarded (including the GUID exports QEMU imports). The original package and
+default launcher stay untouched. This is a diagnostic workaround, not a
+production host scheduling/fencing implementation. Its behavior for actual
+Vulkan submissions and concurrent contexts is unverified.
+
+### Verified results
+
+The successful WHPX/i386/one-vCPU/2048-MiB test used the local private host
+`winq-alpha10-poll2`, EGL headless, standard VGA, and the existing Venus GPU
+options. It completed eight creates/unrefs, 16 maps/unmaps, 65,536 verified bytes
+and eight stale-ID rejections, then destroyed its context and reset without DMA
+quarantine. `vgputest --blob` exited 0. The 1,000 cached diagnostic cycles,
+31 protocol/layout/bounds/fence checks and 264,096 ring completions also passed.
+The non-3D control passed its normal diagnostic and explicitly skipped unsupported
+Venus/blob probes. These were targeted builds, not a clean OS build or endurance
+test. Local evidence under `C:\ReactOS\vm`:
+
+- `graphics-blob-final-result.log`, `graphics-blob-control-result.log`;
+- `graphics-blob-poll-kernel.log`, `graphics-blob-poll.err`,
+  `graphics-blob-final-renderer.log`;
+- `graphics-blob-final-launch.ps1`, `graphics-blob-test.qcow2`,
+  `graphics-blob-final.iso`, `graphics-blob/build-manifest.json`.
+
+See [blob-baseline.json](../../../tools/graphics/blob-baseline.json) for hashes
+and scoped measurements. These results prove CPU mapping/persistence and
+host resource release, not GPU access to the pattern or Vulkan rendering.
+Next: per-file resource ownership, bounded user-mode mappings and cleanup on
+process exit/cancellation, followed by actual Venus/Vulkan execution/readback.

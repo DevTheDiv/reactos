@@ -35,5 +35,12 @@
     "venus_capset_transfer": "passed",
     "context_command_ack_pairs": 8,
     "guest_vulkan_validated": false
+  },
+  "blob_followup": {
+    "measurement": "blob-baseline.json",
+    "original_egl_context_result": "failed eventfd fencing despite context ACKs",
+    "private_poll_adapter_blob_lifecycle": "passed",
+    "per_file_api_implemented": false,
+    "guest_vulkan_validated": false
   }
 }

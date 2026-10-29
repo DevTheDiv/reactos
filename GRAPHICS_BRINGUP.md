@@ -103,10 +103,13 @@ driver does not count as completing step 1.
 
 Capability bring-up now covers bounded capset enumeration/payload transfer and
 Venus context-command acknowledgements in a real ReactOS guest with the
-Windows-specific host. Step 3 is not complete. Implement/test resource lifetime,
-blob mapping and actual context execution before connecting a user-mode Vulkan
-driver. Keep the upstream-host failure separate from the working diagnostic
-configuration; do not infer that any Windows QEMU package supports Venus.
+Windows-specific host. A kernel-owned blob probe now also passes create/map/
+unmap/remap/unref, byte-persistence and stale-ID tests using a private polling
+host adapter. Its detailed logging confirms the original EGL eventfd warning
+prevents real contexts, despite the earlier ACKs. Steps 2 and 3 are not complete:
+per-file lifetime, user mappings, cancellation and actual Vulkan execution remain
+ahead. See [the blob probe](drivers/virtio/vgpudiag/README.md#kernel-owned-blob-lifecycle-probe)
+for the required host configuration and unfenced-unmap limitation.
 
 ## Initial driver constraints
 

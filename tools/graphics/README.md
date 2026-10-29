@@ -89,7 +89,11 @@ ACKs still do not prove Vulkan execution. The verified invocation uses
 Its local launcher is `C:\ReactOS\vm\graphics-winq-launch.ps1`; results are in
 `graphics-winq-result.log`, `graphics-winq-kernel.log`, and `graphics-winq.err`
 under the same VM directory. A host `Failed to create eventfd` warning remains;
-its impact on subsequent rendering/synchronization has not been established.
+the later blob probe confirms it prevents proxy context creation in this EGL
+configuration. Context ACKs alone did not detect that failure. Use the separate
+experimental polling adapter documented in the
+[blob lifecycle notes](../../drivers/virtio/vgpudiag/README.md#kernel-owned-blob-lifecycle-probe)
+for the resource probe; the original Alpha 10 package is unchanged.
 
 ## Targeted guest driver build (Windows/RosBE)
 
