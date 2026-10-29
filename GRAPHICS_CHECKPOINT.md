@@ -2,17 +2,20 @@
 
 Recorded 2026-10-28 Pacific / 2026-10-29 UTC. Branch:
 `graphics/virtio-gpu-vulkan`, based on `node-support` at `dba8148521d`.
-Latest verified code milestone: `5732c1b18b5`.
+Latest verified code milestone: per-file resource ownership (this checkpoint).
 
 ## Resume here
 
 The separate Windows Venus host now passes the ReactOS transport probe.
 **Actual guest Vulkan execution and rendered-image readback remain unverified.**
-Kernel-owned blob creation/mapping/remapping/release now passes a bounded
-eight-cycle probe with a private polling host adapter. The next implementation
-is ownership and cleanup tied to each open file/process, then bounded user-mode
-mappings. No Vulkan ICD, user submission interface, or persistent user resource
-API exists yet.
+Kernel-owned blob creation/mapping/remapping/release passes a bounded
+eight-cycle probe with a private polling host adapter, and that proven
+CREATE_BLOB/MAP_BLOB/UNMAP_BLOB/UNREF path is now also reachable live, per
+open file handle, through five new bounded IOCTLs (`IOCTL_VGPU_QUERY_RESOURCES`,
+`_RESOURCE_CREATE/_WRITE/_READ/_UNREF`). Every transfer is still transactional
+(map, copy, unmap, every call) and kernel-mediated -- no raw VA is ever handed
+to user mode, only bytes. The next implementation is bounded user-mode
+mappings, a Vulkan ICD, and a real user submission interface; none exist yet.
 
 ## Completed and verified
 
@@ -26,6 +29,7 @@ API exists yet.
 | Separate Windows host preparation | `f75b558378b`; pinned release hash, 7-Zip extraction, no installer execution or default QEMU replacement. |
 | Active Windows Venus transport pass | `6b48d164725`; WINQ-EMU Alpha 10 clears the upstream package's lazy renderer initialization failure. |
 | Kernel-owned blob lifetime probe | `5732c1b18b5`; eight creates/unrefs, 16 maps/unmaps, 65,536 verified bytes, eight stale-ID rejections, 31 protocol checks. Requires the private polling host adapter described below. |
+| Per-file live resource ownership | `vgpuresourcetest`; the boot-time probe above now keeps its proven transport alive (one dedicated GPU context, id 64) instead of resetting, gated on that probe having already reached `VGPU_BLOB_COMPLETE`. Allocation limits (8/file, 32 total), known-byte write/read round-trips, invalid-ID and cross-handle foreign-ID rejection, overflow rejection, and cleanup on both explicit close and real process exit (a child process killed mid-ownership) all pass live against the winq-alpha10-poll2 host. `IRP_MN_STOP_DEVICE`/`REMOVE_DEVICE` now tear the live phase down properly; three full reboot cycles in the same guest each re-established the live phase from a clean boot with identical stats, with no stall, leak, or DMA quarantine. |
 
 The latest guest run fetched capsets 1 (308 bytes), 2 (1408 bytes), and
 4/Venus (160 bytes). It completed 22 fenced capability/context commands,
@@ -90,19 +94,18 @@ experiments. Existing base disks and the default VM launcher were not changed.
 
 ## Next work, in order
 
-1. Define versioned, bounded resource operations and per-file ownership:
-   opaque resource IDs, allocation limits, references, and cleanup rules.
-2. Extend the verified kernel-owned CREATE_BLOB/MAP_BLOB/UNMAP_BLOB/UNREF path
-   into those per-file operations. Keep the validated host-window bounds and
-   i386 mapping limits; establish cancellation and stop/reset behavior before
-   exposing mappings to user mode.
-3. Test known-byte mappings, allocation/free churn, invalid and foreign IDs,
-   overflow, process exit, failed commands, and reset/stop cleanup. A local
-   mapping check alone does not establish GPU visibility or execution.
-4. Connect a minimal NT user-mode Venus client and create a real Vulkan
+1. Bounded user-mode mappings: hand a caller-visible view of a resource's
+   bytes without a full raw-VA mapping (e.g. a read/write IOCTL pair is
+   already done; a real mapped view, if still needed once an ICD exists,
+   wants its own cancellation/stop story before it's added).
+2. Connect a minimal NT user-mode Venus client and create a real Vulkan
    instance/device, then execute an off-screen clear with verified pixel readback.
-5. Add native presentation and a small DXVK example after execution and resource
+3. Add native presentation and a small DXVK example after execution and resource
    lifetime are demonstrated. Measure CPU use and latency separately.
+
+Per-file resource ownership (opaque IDs, allocation limits, invalid/foreign-ID
+rejection, close and process-exit cleanup, reset/stop teardown) is done -- see
+the table above and [the driver notes](drivers/virtio/vgpudiag/README.md#per-file-live-resource-ownership).
 
 Architecture and milestone gates: [GRAPHICS_BRINGUP.md](GRAPHICS_BRINGUP.md).
 Implementation and test details: [vgpudiag README](drivers/virtio/vgpudiag/README.md).

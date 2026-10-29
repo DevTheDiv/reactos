@@ -283,5 +283,58 @@ test. Local evidence under `C:\ReactOS\vm`:
 See [blob-baseline.json](../../../tools/graphics/blob-baseline.json) for hashes
 and scoped measurements. These results prove CPU mapping/persistence and
 host resource release, not GPU access to the pattern or Vulkan rendering.
-Next: per-file resource ownership, bounded user-mode mappings and cleanup on
-process exit/cancellation, followed by actual Venus/Vulkan execution/readback.
+
+## Per-file live resource ownership
+
+The kernel-owned blob probe above only ever proved CREATE_BLOB/MAP_BLOB/
+UNMAP_BLOB/UNREF against one hardcoded resource ID, torn down again before
+the driver finished starting. There was no live device left for any later
+IOCTL to act on. Five new bounded IOCTLs make that same, already-proven
+command path reachable live, scoped per open file handle:
+
+| IOCTL | Direction | Purpose |
+| --- | --- | --- |
+| `IOCTL_VGPU_QUERY_RESOURCES` | out | Versioned snapshot: live-ready flag and running create/unref/rejection counters. |
+| `IOCTL_VGPU_RESOURCE_CREATE` | out | Creates a one-page blob, returns its opaque id (`VGPU_RESOURCE_BASE_ID` + a driver-owned slot index). |
+| `IOCTL_VGPU_RESOURCE_WRITE` | in | Transactional: map, `WRITE_REGISTER_BUFFER_UCHAR`, unmap, in that one call. |
+| `IOCTL_VGPU_RESOURCE_READ` | in/out | Same shape, reverse direction. Aliases one METHOD_BUFFERED buffer; the request fields are captured to locals before the response is written. |
+| `IOCTL_VGPU_RESOURCE_UNREF` | in | Releases a resource this handle owns. |
+
+No mapping is ever held across two IOCTL calls, and no CPU virtual address is
+ever returned to user mode -- only bytes, same transactional discipline as the
+boot-time probe. `VGPU_MAX_RESOURCES_PER_FILE` (8) bounds each handle;
+`VGPU_MAX_RESOURCES` (32) bounds the device total.
+
+**Device lifecycle change required for this:** `GpuProbe`'s `Done:` path used
+to unconditionally reset and tear everything down before `IRP_MN_START_DEVICE`
+even completed, which is why no later IOCTL ever had a live queue to use.
+`Done:` now keeps the already-proven transport (BARs, virtio device, queue,
+packet page) alive instead, but only when the blob probe just reached
+`VGPU_BLOB_COMPLETE` -- one more GPU context (id `VGPU_LIVE_CONTEXT`, 64) is
+created on the same queue, and `Ext->LiveReady` gates everything else.
+`IRP_MN_STOP_DEVICE` (newly handled; it previously fell straight through to
+the lower driver with no driver-specific action) and `IRP_MN_REMOVE_DEVICE`
+both call a new `GpuTeardownLive`, which mirrors `Done:`'s own teardown.
+`IRP_MJ_CLEANUP` releases whatever the closing handle still owns -- NT sends
+`CLEANUP` for every open handle during process rundown the same as an explicit
+`CloseHandle`, so this covers both uniformly. A `FAST_MUTEX` serializes every
+live resource op (and `GpuTeardownLive`) against each other and against the
+single in-flight command packet the transport has always been limited to.
+
+`vgpuresourcetest` exercises: filling and exceeding the per-file allocation
+limit, a known-byte write/read round trip, an oversized write/read rejected
+before the driver ever touches the device, an invalid id and one below
+`VGPU_RESOURCE_BASE_ID`, a second handle rejected from writing/unref'ing the
+first handle's resource (and succeeding on its own), explicit unref churn,
+cleanup on an unref'd `CloseHandle`, and cleanup on a *real* process exit --
+a spawned child process creates resources and calls `ExitProcess` without
+closing cleanly, and the parent confirms they were released. All of the above
+passed live against the `winq-alpha10-poll2` host in the same run that
+re-verified the existing blob/Venus probes unchanged. The guest was then
+rebooted three times in a row (via SAC's native `shutdown` command) to
+exercise the new `STOP_DEVICE`/`REMOVE_DEVICE` teardown path; each boot
+re-established the live phase from scratch with identical stats, no stall
+(including at the `sacsvr.exe` shutdown checkpoint), leak, or DMA quarantine.
+
+Next: bounded user-mode mappings, a Vulkan ICD, and a real user submission
+interface -- followed by actual Venus/Vulkan execution and pixel readback.
