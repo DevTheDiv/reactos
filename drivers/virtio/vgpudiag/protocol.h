@@ -8,6 +8,11 @@
 #define VGPU_GET_CAPSET 0x0109
 #define VGPU_CTX_CREATE 0x0200
 #define VGPU_CTX_DESTROY 0x0201
+#define VGPU_RESOURCE_UNREF 0x0102
+#define VGPU_CREATE_BLOB 0x010c
+#define VGPU_MAP_BLOB 0x0208
+#define VGPU_UNMAP_BLOB 0x0209
+#define VGPU_RESP_MAP_INFO 0x1106
 #define VGPU_RESP_NODATA 0x1100
 #define VGPU_RESP_DISPLAY_INFO 0x1101
 #define VGPU_RESP_CAPSET_INFO 0x1102
@@ -45,6 +50,34 @@ typedef struct _GPU_CONTEXT_REQUEST
     ULONG NameLength, Init;
     CHAR Name[64];
 } GPU_CONTEXT_REQUEST;
+typedef struct _GPU_BLOB_REQUEST
+{
+    GPU_HEADER Header;
+    ULONG Resource, Memory, Flags, Entries;
+    ULONGLONG Blob, Size;
+} GPU_BLOB_REQUEST;
+typedef struct _GPU_RESOURCE_REQUEST
+{
+    GPU_HEADER Header;
+    ULONG Resource, Padding;
+} GPU_RESOURCE_REQUEST;
+typedef struct _GPU_MAP_REQUEST
+{
+    GPU_RESOURCE_REQUEST Resource;
+    ULONGLONG Offset;
+} GPU_MAP_REQUEST;
+typedef struct _GPU_MAP_RESPONSE
+{
+    GPU_HEADER Header;
+    ULONG Cache, Padding;
+} GPU_MAP_RESPONSE;
+
+/* Subtraction-based bounds checks are shared with the native regression. */
+static __inline int
+VgpuWindowFits(ULONGLONG BarBytes, ULONGLONG Offset, ULONGLONG Length)
+{
+    return Length && Offset <= BarBytes && Length <= BarBytes - Offset;
+}
 
 #define VGPU_REPLY_OK 0
 #define VGPU_REPLY_DEVICE_ERROR 1
@@ -54,7 +87,7 @@ static __inline int
 VgpuCheckReply(const GPU_HEADER *Reply, ULONG Used, ULONG ExpectedBytes,
                ULONG ExpectedType, ULONGLONG Fence)
 {
-    if (Used < sizeof(*Reply) || Reply->Flags != VGPU_FLAG_FENCE || Reply->Fence != Fence)
+    if (Used < sizeof(*Reply) || Reply->Flags != (Fence ? VGPU_FLAG_FENCE : 0) || Reply->Fence != Fence)
         return VGPU_REPLY_MALFORMED;
     if (Reply->Type >= 0x1200 && Reply->Type <= 0x1205 && Used == sizeof(*Reply))
         return VGPU_REPLY_DEVICE_ERROR;

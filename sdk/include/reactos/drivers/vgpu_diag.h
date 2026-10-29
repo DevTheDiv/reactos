@@ -58,3 +58,26 @@ typedef struct _VGPU_VENUS_INFO
     VGPU_CAPSET_INFO Capsets[VGPU_MAX_CAPSETS];
     UCHAR VenusPrefix[VGPU_VENUS_PREFIX_BYTES];
 } VGPU_VENUS_INFO;
+
+#define IOCTL_VGPU_QUERY_BLOB \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define VGPU_BLOB_VERSION 1
+#define VGPU_BLOB_CYCLES 8
+#define VGPU_BLOB_NOT_PROBED 0
+#define VGPU_BLOB_UNSUPPORTED 1
+#define VGPU_BLOB_WINDOW 2
+#define VGPU_BLOB_CONTEXT 3
+#define VGPU_BLOB_RESOURCE 4
+#define VGPU_BLOB_MAPPED 5
+#define VGPU_BLOB_PATTERN 6
+#define VGPU_BLOB_COMPLETE 7
+
+/* Boot-time kernel-only probe. No user mappings or resource handles. */
+typedef struct _VGPU_BLOB_INFO
+{
+    ULONG Size, Version, Stage, Status;
+    ULONG WindowBar, WindowBytesLow, WindowBytesHigh;
+    ULONG CyclesCompleted, PatternBytes, MapCount, UnmapCount;
+    ULONG ResourceCreates, ResourceUnrefs, LastCommand, LastResponse, CachePolicy;
+    ULONG StaleIdRejections;
+} VGPU_BLOB_INFO;

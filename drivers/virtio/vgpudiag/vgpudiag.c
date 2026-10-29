@@ -29,6 +29,10 @@ C_ASSERT(sizeof(GPU_CAPSET_REQUEST) == 32);
 C_ASSERT(sizeof(GPU_CAPSET_RESPONSE) == 40);
 C_ASSERT(sizeof(GPU_CONTEXT_REQUEST) == 96);
 C_ASSERT(sizeof(VGPU_VENUS_INFO) == 368);
+C_ASSERT(sizeof(GPU_BLOB_REQUEST) == 56);
+C_ASSERT(sizeof(GPU_MAP_REQUEST) == 40);
+C_ASSERT(sizeof(GPU_MAP_RESPONSE) == 32);
+C_ASSERT(sizeof(VGPU_BLOB_INFO) == 68);
 
 typedef struct _GPU_BAR
 {
@@ -44,6 +48,7 @@ typedef struct _GPU_EXTENSION
     KSPIN_LOCK InfoLock;
     VGPU_DIAG_INFO Info;
     VGPU_VENUS_INFO Venus, ProbeVenus;
+    VGPU_BLOB_INFO Blob, ProbeBlob;
     BUS_INTERFACE_STANDARD Bus;
     PCI_COMMON_CONFIG Pci;
     GPU_BAR Bars[PCI_TYPE0_ADDRESSES];
@@ -54,6 +59,7 @@ typedef struct _GPU_EXTENSION
     BOOLEAN DmaQuarantined;
     ULONGLONG NextFence;
     ULONGLONG VenusDeadline;
+    BOOLEAN TrackingBlob;
 } GPU_EXTENSION;
 
 static LONG DevicePresent;
@@ -273,16 +279,24 @@ static NTSTATUS GpuCommand(GPU_EXTENSION *Ext, struct virtqueue *Queue,
         RequestBytes > VGPU_RESPONSE_OFFSET || ReplyBytes > PAGE_SIZE - VGPU_RESPONSE_OFFSET)
         return STATUS_INVALID_BUFFER_SIZE;
     Deadline = KeQueryInterruptTime();
-    if (TrackVenus && Deadline >= Ext->VenusDeadline) return STATUS_IO_TIMEOUT;
+    if ((TrackVenus || Ext->TrackingBlob) && Deadline >= Ext->VenusDeadline) return STATUS_IO_TIMEOUT;
     Deadline += 50000000;
-    if (TrackVenus && Deadline > Ext->VenusDeadline) Deadline = Ext->VenusDeadline;
-    Request->Flags = VGPU_FLAG_FENCE;
-    Request->Fence = ++Ext->NextFence;
+    if ((TrackVenus || Ext->TrackingBlob) && Deadline > Ext->VenusDeadline) Deadline = Ext->VenusDeadline;
+    /* Unmap only acknowledges removal of this CPU-only transport mapping.
+     * There is no GPU work in flight in this probe. Keep all other commands
+     * fenced; never accept an unfenced response to a fenced request. */
+    Request->Flags = Request->Type == VGPU_UNMAP_BLOB ? 0 : VGPU_FLAG_FENCE;
+    Request->Fence = Request->Flags ? ++Ext->NextFence : 0;
     RtlZeroMemory(Reply, ReplyBytes);
     if (TrackVenus)
     {
         Ext->ProbeVenus.LastCommand = Request->Type;
         Ext->ProbeVenus.LastResponse = 0;
+    }
+    if (Ext->TrackingBlob)
+    {
+        Ext->ProbeBlob.LastCommand = Request->Type;
+        Ext->ProbeBlob.LastResponse = 0;
     }
     Buffers[0].physAddr = MmGetPhysicalAddress(Request);
     Buffers[0].length = RequestBytes;
@@ -302,6 +316,7 @@ static NTSTATUS GpuCommand(GPU_EXTENSION *Ext, struct virtqueue *Queue,
     KeMemoryBarrier();
     if (Token != Ext || Used > ReplyBytes) return STATUS_DEVICE_PROTOCOL_ERROR;
     if (TrackVenus && Used >= sizeof(*Reply)) Ext->ProbeVenus.LastResponse = Reply->Type;
+    if (Ext->TrackingBlob && Used >= sizeof(*Reply)) Ext->ProbeBlob.LastResponse = Reply->Type;
     Result = VgpuCheckReply(Reply, Used, ReplyBytes, ReplyType, Request->Fence);
     if (Result == VGPU_REPLY_DEVICE_ERROR) return STATUS_NOT_SUPPORTED;
     if (Result != VGPU_REPLY_OK) return STATUS_DEVICE_PROTOCOL_ERROR;
@@ -391,6 +406,158 @@ static NTSTATUS GpuProbeVenus(GPU_EXTENSION *Ext, struct virtqueue *Queue, ULONG
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS GpuBlobWindow(GPU_EXTENSION *Ext, PHYSICAL_ADDRESS *Physical)
+{
+    PUCHAR Config = (PUCHAR)&Ext->Pci, Cap;
+    ULONG At = Ext->Pci.u.type0.CapabilitiesPtr, Parts[4], Bar;
+    ULONGLONG Offset, Length, Address;
+    BOOLEAN Found = FALSE;
+    /* The capability chain has already passed GpuValidateCaps. */
+    while (At)
+    {
+        Cap = Config + At;
+        if (Cap[0] == PCI_CAPABILITY_ID_VENDOR_SPECIFIC && Cap[3] == 8 && Cap[5] == 1)
+        {
+            if (Found || Cap[2] < 24 || At > sizeof(Ext->Pci) - 24)
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            Bar = Cap[4];
+            if (Bar >= RTL_NUMBER_OF(Ext->Bars)) return STATUS_DEVICE_CONFIGURATION_ERROR;
+            RtlCopyMemory(Parts, Cap + 8, sizeof(Parts));
+            Offset = Parts[0] | ((ULONGLONG)Parts[2] << 32);
+            Length = Parts[1] | ((ULONGLONG)Parts[3] << 32);
+            if (!VgpuWindowFits(Ext->Bars[Bar].Length, Offset, Length) ||
+                Length < PAGE_SIZE || (Offset & (PAGE_SIZE - 1)))
+                return STATUS_DEVICE_CONFIGURATION_ERROR;
+            Address = Ext->Bars[Bar].Physical.QuadPart;
+            if (Address > MAXULONG || Offset > MAXULONG - Address ||
+                PAGE_SIZE - 1 > MAXULONG - (Address + Offset))
+                return STATUS_NOT_SUPPORTED;
+            if ((Address + Offset) & (PAGE_SIZE - 1)) return STATUS_DEVICE_CONFIGURATION_ERROR;
+            Physical->QuadPart = Address + Offset;
+            Ext->ProbeBlob.WindowBar = Bar;
+            Ext->ProbeBlob.WindowBytesLow = (ULONG)Length;
+            Ext->ProbeBlob.WindowBytesHigh = (ULONG)(Length >> 32);
+            Found = TRUE;
+        }
+        At = Cap[1];
+    }
+    return Found ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+}
+
+/* Kernel-owned, single-page resources only. No mapping survives this probe. */
+static NTSTATUS GpuProbeBlob(GPU_EXTENSION *Ext, struct virtqueue *Queue)
+{
+    VGPU_BLOB_INFO *Info = &Ext->ProbeBlob;
+    GPU_CONTEXT_REQUEST *Context = Ext->Packet;
+    GPU_BLOB_REQUEST *Create = Ext->Packet;
+    GPU_MAP_REQUEST *Map = Ext->Packet;
+    GPU_RESOURCE_REQUEST *Resource = Ext->Packet;
+    GPU_MAP_RESPONSE *Reply = (GPU_MAP_RESPONSE *)((PUCHAR)Ext->Packet + VGPU_RESPONSE_OFFSET);
+    PHYSICAL_ADDRESS Physical;
+    PUCHAR View = NULL, Pattern = NULL;
+    NTSTATUS Status;
+    MEMORY_CACHING_TYPE Cache;
+    ULONG Cycle, Pass, i;
+
+    Info->Stage = VGPU_BLOB_UNSUPPORTED;
+    if (Ext->ProbeVenus.Status || Ext->ProbeVenus.Gate != VGPU_VENUS_CONTEXT_ACK)
+        return STATUS_NOT_SUPPORTED;
+    Status = GpuBlobWindow(Ext, &Physical);
+    if (!NT_SUCCESS(Status)) return Status;
+    Info->Stage = VGPU_BLOB_WINDOW;
+    Pattern = GpuAllocPool(Ext, PAGE_SIZE);
+    if (!Pattern) return STATUS_INSUFFICIENT_RESOURCES;
+    Ext->TrackingBlob = TRUE;
+    Ext->VenusDeadline = KeQueryInterruptTime() + 300000000;
+    RtlZeroMemory(Context, VGPU_RESPONSE_OFFSET);
+    Context->Header.Type = VGPU_CTX_CREATE;
+    Context->Header.Context = 32;
+    Context->Init = VGPU_CAPSET_VENUS;
+    Context->NameLength = 9;
+    RtlCopyMemory(Context->Name, "vgpu-blob", 9);
+    Status = GpuCommand(Ext, Queue, sizeof(*Context), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+    if (!NT_SUCCESS(Status)) goto Exit;
+    Info->Stage = VGPU_BLOB_CONTEXT;
+    for (Cycle = 0; Cycle < VGPU_BLOB_CYCLES; ++Cycle)
+    {
+        RtlZeroMemory(Create, VGPU_RESPONSE_OFFSET);
+        Create->Header.Type = VGPU_CREATE_BLOB;
+        Create->Header.Context = 32;
+        Create->Resource = 256; /* Deliberate ID reuse after acknowledged unref. */
+        Create->Memory = 2; /* HOST3D */
+        Create->Flags = 1; /* MAPPABLE */
+        Create->Size = PAGE_SIZE;
+        /* Venus blob ID zero is host-allocated transport memory. */
+        Status = GpuCommand(Ext, Queue, sizeof(*Create), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+        if (!NT_SUCCESS(Status)) goto Exit;
+        ++Info->ResourceCreates;
+        Info->Stage = VGPU_BLOB_RESOURCE;
+        for (i = 0; i < PAGE_SIZE; ++i) Pattern[i] = (UCHAR)((i * 29 + Cycle * 17) ^ 0xa5);
+        for (Pass = 0; Pass < 2; ++Pass)
+        {
+            RtlZeroMemory(Map, VGPU_RESPONSE_OFFSET);
+            Map->Resource.Header.Type = VGPU_MAP_BLOB;
+            Map->Resource.Resource = 256;
+            Status = GpuCommand(Ext, Queue, sizeof(*Map), sizeof(*Reply), VGPU_RESP_MAP_INFO, FALSE);
+            if (!NT_SUCCESS(Status)) goto Exit;
+            ++Info->MapCount;
+            Info->CachePolicy = Reply->Cache;
+            if (Reply->Cache == 1) Cache = MmCached;
+            else if (Reply->Cache == 2) Cache = MmNonCached;
+            else if (Reply->Cache == 3) Cache = MmWriteCombined;
+            else { Status = STATUS_NOT_SUPPORTED; goto Exit; }
+            View = MmMapIoSpace(Physical, PAGE_SIZE, Cache);
+            if (!View) { Status = STATUS_INSUFFICIENT_RESOURCES; goto Exit; }
+            Info->Stage = VGPU_BLOB_MAPPED;
+            if (!Pass) WRITE_REGISTER_BUFFER_UCHAR(View, Pattern, PAGE_SIZE);
+            KeMemoryBarrier();
+            for (i = 0; i < PAGE_SIZE; ++i)
+            {
+                if (READ_REGISTER_UCHAR(View + i) != Pattern[i])
+                { Status = STATUS_DATA_ERROR; goto Exit; }
+            }
+            Info->PatternBytes += PAGE_SIZE;
+            MmUnmapIoSpace(View, PAGE_SIZE);
+            View = NULL;
+            RtlZeroMemory(Resource, VGPU_RESPONSE_OFFSET);
+            Resource->Header.Type = VGPU_UNMAP_BLOB;
+            Resource->Resource = 256;
+            Status = GpuCommand(Ext, Queue, sizeof(*Resource), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+            if (!NT_SUCCESS(Status)) goto Exit;
+            ++Info->UnmapCount;
+        }
+        Info->Stage = VGPU_BLOB_PATTERN;
+        RtlZeroMemory(Resource, VGPU_RESPONSE_OFFSET);
+        Resource->Header.Type = VGPU_RESOURCE_UNREF;
+        Resource->Resource = 256;
+        Status = GpuCommand(Ext, Queue, sizeof(*Resource), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+        if (!NT_SUCCESS(Status)) goto Exit;
+        ++Info->ResourceUnrefs;
+        /* A real lookup after unref must reject the released ID. This checks
+         * release, rather than trusting an unconditional unref ACK alone. */
+        RtlZeroMemory(Map, VGPU_RESPONSE_OFFSET);
+        Map->Resource.Header.Type = VGPU_MAP_BLOB;
+        Map->Resource.Resource = 256;
+        Status = GpuCommand(Ext, Queue, sizeof(*Map), sizeof(*Reply), VGPU_RESP_MAP_INFO, FALSE);
+        if (Status != STATUS_NOT_SUPPORTED || Info->LastResponse != 0x1203)
+        { if (NT_SUCCESS(Status)) Status = STATUS_DEVICE_PROTOCOL_ERROR; goto Exit; }
+        ++Info->StaleIdRejections;
+        ++Info->CyclesCompleted;
+    }
+    RtlZeroMemory(Context, VGPU_RESPONSE_OFFSET);
+    Context->Header.Type = VGPU_CTX_DESTROY;
+    Context->Header.Context = 32;
+    Status = GpuCommand(Ext, Queue, sizeof(GPU_HEADER), sizeof(GPU_HEADER), VGPU_RESP_NODATA, FALSE);
+    if (NT_SUCCESS(Status)) Info->Stage = VGPU_BLOB_COMPLETE;
+Exit:
+    /* After any failed command stop submitting; the caller resets the device.
+     * Drop CPU mappings first so no PTE references an invalidated host window. */
+    if (View) MmUnmapIoSpace(View, PAGE_SIZE);
+    GpuFreePool(Ext, Pattern);
+    Ext->TrackingBlob = FALSE;
+    return Status;
+}
+
 static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
 {
     NTSTATUS Status, ResetStatus = STATUS_SUCCESS;
@@ -412,6 +579,10 @@ static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
     Ext->ProbeVenus.Size = sizeof(Ext->ProbeVenus);
     Ext->ProbeVenus.Version = VGPU_VENUS_VERSION;
     Ext->ProbeVenus.Status = STATUS_DEVICE_NOT_READY;
+    RtlZeroMemory(&Ext->ProbeBlob, sizeof(Ext->ProbeBlob));
+    Ext->ProbeBlob.Size = sizeof(Ext->ProbeBlob);
+    Ext->ProbeBlob.Version = VGPU_BLOB_VERSION;
+    Ext->ProbeBlob.Status = STATUS_DEVICE_NOT_READY;
     Ext->NextFence = 0;
     Status = GpuGetBus(Ext);
     if (!NT_SUCCESS(Status)) goto Done;
@@ -492,6 +663,12 @@ static NTSTATUS GpuProbe(GPU_EXTENSION *Ext, PIO_STACK_LOCATION Stack)
     Info.CompletedRequests = 1;
     Info.Stage = VGPU_STAGE_COMPLETE;
     Ext->ProbeVenus.Status = GpuProbeVenus(Ext, Queue, Features);
+    Ext->ProbeBlob.Status = GpuProbeBlob(Ext, Queue);
+    DbgPrint("vgpudiag: blob stage=%lu status=%08lx cycles=%lu maps=%lu/%lu resources=%lu/%lu bytes=%lu cache=%lu stale=%lu last=%lx/%lx\n",
+             Ext->ProbeBlob.Stage, Ext->ProbeBlob.Status, Ext->ProbeBlob.CyclesCompleted,
+             Ext->ProbeBlob.MapCount, Ext->ProbeBlob.UnmapCount, Ext->ProbeBlob.ResourceCreates,
+             Ext->ProbeBlob.ResourceUnrefs, Ext->ProbeBlob.PatternBytes, Ext->ProbeBlob.CachePolicy, Ext->ProbeBlob.StaleIdRejections,
+             Ext->ProbeBlob.LastCommand, Ext->ProbeBlob.LastResponse);
     DbgPrint("vgpudiag: venus gate=%lu status=%08lx capsets=%lu/%lu commands=%lu context_ack_pairs=%lu last=%lx/%lx\n",
              Ext->ProbeVenus.Gate, Ext->ProbeVenus.Status, Ext->ProbeVenus.CapsetCount, Ext->ProbeVenus.ReportedCapsets,
              Ext->ProbeVenus.CompletedRequests, Ext->ProbeVenus.ContextAckPairs, Ext->ProbeVenus.LastCommand, Ext->ProbeVenus.LastResponse);
@@ -538,6 +715,7 @@ Done:
     KeAcquireSpinLock(&Ext->InfoLock, &Irql);
     Ext->Info = Info;
     Ext->Venus = Ext->ProbeVenus;
+    Ext->Blob = Ext->ProbeBlob;
     KeReleaseSpinLock(&Ext->InfoLock, Irql);
     DbgPrint("vgpudiag: stage=%lu status=%08lx reset=%08lx completed=%lu scanouts=%lu flags=%lx\n",
              Info.Stage, Info.Status, Info.ResetStatus, Info.CompletedRequests, Info.EnabledScanouts, Info.Flags);
@@ -604,9 +782,15 @@ static NTSTATUS NTAPI GpuDispatch(PDEVICE_OBJECT Device, PIRP Irp)
         PVOID Snapshot;
         Status = STATUS_INVALID_DEVICE_REQUEST;
         if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_DIAGNOSTICS ||
-            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS)
+            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS ||
+            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_BLOB)
         {
-            if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS)
+            if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_BLOB)
+            {
+                Snapshot = &Ext->Blob;
+                Size = sizeof(Ext->Blob);
+            }
+            else if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_VGPU_QUERY_VENUS)
             {
                 Snapshot = &Ext->Venus;
                 Size = sizeof(Ext->Venus);
@@ -666,6 +850,9 @@ static NTSTATUS NTAPI GpuAddDevice(PDRIVER_OBJECT Driver, PDEVICE_OBJECT Pdo)
     Ext->Venus.Size = sizeof(Ext->Venus);
     Ext->Venus.Version = VGPU_VENUS_VERSION;
     Ext->Venus.Status = STATUS_DEVICE_NOT_READY;
+    Ext->Blob.Size = sizeof(Ext->Blob);
+    Ext->Blob.Version = VGPU_BLOB_VERSION;
+    Ext->Blob.Status = STATUS_DEVICE_NOT_READY;
     Ext->Lower = IoAttachDeviceToDeviceStack(Device, Pdo);
     if (!Ext->Lower) { Status = STATUS_NO_SUCH_DEVICE; IoDeleteDevice(Device); goto Failed; }
     Status = IoCreateSymbolicLink(&Link, &Name);

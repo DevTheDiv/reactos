@@ -53,6 +53,38 @@ static int CheckVenus(BOOL Required)
     return 0;
 }
 
+static int CheckBlob(BOOL Required)
+{
+    VGPU_BLOB_INFO Info;
+    DWORD Bytes, Error;
+    BOOL Success;
+    HANDLE Device = OpenProbe();
+    if (Device == INVALID_HANDLE_VALUE) return 1;
+    Success = DeviceIoControl(Device, IOCTL_VGPU_QUERY_BLOB, NULL, 0,
+                              &Info, sizeof(Info) - 1, &Bytes, NULL);
+    Error = GetLastError();
+    if (Success || Error != ERROR_INSUFFICIENT_BUFFER)
+    { CloseHandle(Device); puts("FAIL: short blob snapshot"); return 1; }
+    Success = DeviceIoControl(Device, IOCTL_VGPU_QUERY_BLOB, NULL, 0,
+                              &Info, sizeof(Info), &Bytes, NULL);
+    CloseHandle(Device);
+    if (!Success || Bytes != sizeof(Info) || Info.Size != sizeof(Info) || Info.Version != VGPU_BLOB_VERSION)
+    { puts("FAIL: blob diagnostic schema/read"); return 1; }
+    printf("blob stage=%lu status=%08lx window_bar=%lu window_bytes=%08lx%08lx cycles=%lu maps=%lu/%lu resources=%lu/%lu pattern_bytes=%lu cache=%lu stale=%lu last=%lx/%lx\n",
+           Info.Stage, Info.Status, Info.WindowBar, Info.WindowBytesHigh, Info.WindowBytesLow,
+           Info.CyclesCompleted, Info.MapCount, Info.UnmapCount, Info.ResourceCreates,
+           Info.ResourceUnrefs, Info.PatternBytes, Info.CachePolicy, Info.StaleIdRejections, Info.LastCommand, Info.LastResponse);
+    if (!Required && Info.Stage == VGPU_BLOB_UNSUPPORTED && Info.Status == 0xc00000bb)
+    { puts("SKIP: blob prerequisites unavailable"); return 0; }
+    if (Info.Status || Info.Stage != VGPU_BLOB_COMPLETE || Info.CyclesCompleted != VGPU_BLOB_CYCLES ||
+        Info.MapCount != 2 * VGPU_BLOB_CYCLES || Info.UnmapCount != Info.MapCount ||
+        Info.ResourceCreates != VGPU_BLOB_CYCLES || Info.ResourceUnrefs != Info.ResourceCreates ||
+        Info.PatternBytes != 2 * VGPU_BLOB_CYCLES * 4096 || Info.StaleIdRejections != VGPU_BLOB_CYCLES)
+    { puts("FAIL: blob lifecycle/pattern probe"); return 1; }
+    puts("PASS: kernel blob create/map/unmap/remap/unref and byte persistence; GPU execution remains unverified");
+    return 0;
+}
+
 static int Install(const char *Path, DWORD Cycles, BOOL Regression)
 {
     typedef BOOL (WINAPI *UPDATE)(HWND, LPCWSTR, LPCWSTR, DWORD, PBOOL);
@@ -120,6 +152,7 @@ int main(int argc, char **argv)
     DWORD Bytes, Error, i, Count = 1000;
     BOOL Success;
     BOOL RequireVenus = FALSE;
+    BOOL RequireBlob = FALSE;
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 3 && !strcmp(argv[1], "--install")) return Install(argv[2], 1, FALSE);
     if ((argc == 3 || argc == 4) && !strcmp(argv[1], "--install-test"))
@@ -128,7 +161,8 @@ int main(int argc, char **argv)
         if (!Count || Count > 1000) return 1;
         return Install(argv[2], Count, TRUE);
     }
-    if (argc == 2 && !strcmp(argv[1], "--venus")) RequireVenus = TRUE;
+    if (argc == 2 && !strcmp(argv[1], "--blob")) RequireBlob = TRUE;
+    else if (argc == 2 && !strcmp(argv[1], "--venus")) RequireVenus = TRUE;
     else if (argc == 2) Count = strtoul(argv[1], NULL, 10);
     if (!Count || Count > 100000) return 1;
     Device = OpenProbe();
@@ -180,5 +214,6 @@ int main(int argc, char **argv)
         { printf("FAIL: read/open/close cycle %lu\n", i); return 1; }
     }
     printf("PASS: fenced GET_DISPLAY_INFO; %lu diagnostic open/read/close cycles; invalid requests rejected\n", Count);
-    return CheckVenus(RequireVenus);
+    if (CheckVenus(RequireVenus || RequireBlob)) return 1;
+    return CheckBlob(RequireBlob);
 }
