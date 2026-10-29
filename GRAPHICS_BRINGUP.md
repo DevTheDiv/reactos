@@ -2,6 +2,9 @@
 
 Branch: `graphics/virtio-gpu-vulkan`, based on `node-support` at `dba8148521d`.
 
+For the latest verified state, commit trail, evidence paths, and next work,
+start with [GRAPHICS_CHECKPOINT.md](GRAPHICS_CHECKPOINT.md).
+
 The first target is a render-only virtio-gpu prototype with verified resource
 lifetime and synchronization. Build toward a Vulkan ICD, then a small DXVK
 application. This route does not require implementing WDDM. It still requires a
